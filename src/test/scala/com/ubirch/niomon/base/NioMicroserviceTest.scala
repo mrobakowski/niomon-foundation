@@ -1,83 +1,93 @@
 package com.ubirch.niomon.base
 
-import java.time.Duration
+import com.typesafe.scalalogging.StrictLogging
+import net.manub.embeddedkafka.EmbeddedKafka
+import org.apache.kafka.common.serialization.StringDeserializer
+import org.scalatest.{FlatSpec, Matchers}
 
-import cakesolutions.kafka.{KafkaConsumer, KafkaProducer}
-import cakesolutions.kafka.testkit.KafkaServer
-import org.apache.kafka.clients.producer.ProducerRecord
-import org.apache.kafka.clients.consumer.{ConsumerRecord, KafkaConsumer => JKafkaConsumer}
-import org.apache.kafka.common.serialization.{StringDeserializer, StringSerializer}
-import org.scalatest.{BeforeAndAfterEach, FlatSpec, Matchers}
-
-import scala.collection.JavaConverters._
-import scala.concurrent.Await
 import scala.concurrent.duration._
+import scala.concurrent.{Await, Awaitable}
 
-class NioMicroserviceTest extends FlatSpec with Matchers with BeforeAndAfterEach {
-  var kafka: KafkaServer = _
-  var producer: KafkaProducer[String, String] = _
-  var consumer: JKafkaConsumer[String, String] = _
-
+class NioMicroserviceTest extends FlatSpec with Matchers with EmbeddedKafka with StrictLogging {
   "NioMicroservice" should "work" in {
-    consumer.subscribe(List("bar").asJava)
-
-    //noinspection TypeAnnotation
-    val microservice = new NioMicroservice[String, String]("test") {
+    withRunningKafka {
       var n = 0
-
-      override def process(input: String): (String, String) = {
-        n += 1
-        s"foobar$n" -> "default"
+      val microservice = new NioMicroservice[String, String]("test") {
+        override def process(input: String): (String, String) = {
+          n += 1
+          s"foobar$n" -> "default"
+        }
       }
+
+      val control = microservice.run
+
+      publishStringMessageToKafka("foo", "eins")
+      publishStringMessageToKafka("foo", "zwei")
+      publishStringMessageToKafka("foo", "drei")
+
+      val records = consumeNumberStringMessagesFrom("bar", 3)
+
+      records.size should equal(3)
+      records should contain allOf("foobar1", "foobar2", "foobar3")
+
+      // NOTE: shutdown takes too long, so we don't actually shut down the microservice here - but it may mess up other
+      // tests, so be careful
+//      await(control.drainAndShutdown()(microservice.system.dispatcher))
     }
-    val control = microservice.run
+  }
 
-    producer.send(new ProducerRecord("foo", "1", "quux"))
-    producer.send(new ProducerRecord("foo", "2", "quux"))
-    producer.send(new ProducerRecord("foo", "3", "quux"))
+  it should "send error to error topic and continue to work if error topic configured" in {
+    withRunningKafka {
+      //noinspection TypeAnnotation
+      // NOTE: look at application.conf in test resources for relevant config
+      val microservice = new NioMicroservice[String, String]("test-with-error") {
+        var first = true
 
-    var records = List[ConsumerRecord[String, String]]()
+        override def process(input: String): (String, String) = {
+          if (first) {
+            first = false
+            throw new RuntimeException("foobar")
+          } else {
+            "barbaz" -> "default"
+          }
+        }
+      }
+      val control = microservice.run
 
-    while (records.size < 3) {
-      val res = consumer.poll(Duration.ofSeconds(2))
-      consumer.commitAsync()
-      records = records ::: res.iterator().asScala.toList
+      publishStringMessageToKafka("foo", "quux")
+      publishStringMessageToKafka("foo", "kex")
+
+      implicit val d: StringDeserializer = new StringDeserializer
+      val records = consumeNumberMessagesFromTopics[String](Set("bar", "error"), 2)
+
+      records.size should equal(2)
+      records.keys should contain only ("bar", "error")
+      records("bar") should contain only "barbaz"
+      records("error") should contain only "[test-with-error] had an unexpected exception: foobar"
+
+      // NOTE: shutdown takes too long, so we don't actually shut down the microservice here - but it may mess up other
+      // tests, so be careful
+//      await(control.drainAndShutdown()(microservice.system.dispatcher))
     }
-
-    records.size should equal(3)
-    records.map(_.value()) should contain allOf("foobar1", "foobar2", "foobar3")
-
-    Await.result(control.drainAndShutdown()(microservice.system.dispatcher), 1.minute)
   }
 
   it should "shutdown on error with no error topic configured" in {
-    //noinspection TypeAnnotation
-    val microservice = new NioMicroservice[String, String]("test") {
-      override def process(input: String): (String, String) = {
-        throw new RuntimeException("foobar")
+    withRunningKafka {
+      val microservice = new NioMicroservice[String, String]("test") {
+        override def process(input: String): (String, String) = {
+          throw new RuntimeException("foobar")
+        }
       }
+      val after = microservice.isDone
+
+      publishStringMessageToKafka("foo", "quux")
+
+      val res = await(after.failed)
+
+      res shouldBe a[RuntimeException]
+      res.getMessage should equal("foobar")
     }
-    val after = microservice.isDone
-
-    producer.send(new ProducerRecord("foo", "1", "quux"))
-
-    val res = Await.result(after.failed, 1.minute)
-
-    res shouldBe a[RuntimeException]
-    res.getMessage should equal("foobar")
   }
 
-  override protected def beforeEach(): Unit = {
-    kafka = new KafkaServer(kafkaPort = 9092)
-    kafka.startup()
-    consumer = KafkaConsumer(KafkaConsumer.Conf(new StringDeserializer, new StringDeserializer, groupId = "nio-test"))
-    producer = KafkaProducer(KafkaProducer.Conf(new StringSerializer, new StringSerializer))
-  }
-
-  override protected def afterEach(): Unit = {
-    producer.close()
-    consumer.close()
-    kafka.close()
-    kafka = null
-  }
+  def await[T](x: Awaitable[T]): T = Await.result(x, Duration.Inf)
 }
