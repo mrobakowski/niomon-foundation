@@ -1,5 +1,7 @@
 package com.ubirch.niomon.base
 
+import java.time.Duration
+
 import akka.Done
 import akka.actor.ActorSystem
 import akka.kafka._
@@ -48,6 +50,8 @@ abstract class NioMicroservice[Input, Output](name: String)
       .withBootstrapServers(kafkaUrl)
       .withGroupId(name)
       .withProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest")
+      // timeout for closing the producer stage - by default it'll wait for commits for 30 seconds
+      .withStopTimeout(Try(config.getDuration("kafka.stopTimeout")).getOrElse(Duration.ofSeconds(30)))
 
   val producerSettingsForSuccess: ProducerSettings[String, Output] =
     ProducerSettings(producerConfig, new StringSerializer, outputPayload.serializer)
@@ -138,7 +142,7 @@ abstract class NioMicroservice[Input, Output](name: String)
     graph.run()
   }
 
-  def isDone: Future[Done] = {
+  def runUntilDone: Future[Done] = {
     val control = run
     // flatMapped to `drainAndShutdown`, because bare `isShutdown` doesn't propagate errors
     control.isShutdown.flatMap { _ =>

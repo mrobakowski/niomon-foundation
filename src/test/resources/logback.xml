@@ -30,9 +30,8 @@
     </appender>
 
     <logger name="com.ubirch" level="DEBUG"/>
-    <logger name="cakesolutions.kafka.testkit" level="INFO"/>
 
-    <root level="WARN">
+    <root level="INFO">
         <appender-ref ref="STDERR"/>
     </root>
 </configuration>

@@ -3,12 +3,12 @@ package com.ubirch.niomon.base
 import com.typesafe.scalalogging.StrictLogging
 import net.manub.embeddedkafka.EmbeddedKafka
 import org.apache.kafka.common.serialization.StringDeserializer
-import org.scalatest.{FlatSpec, Matchers}
+import org.scalatest.{BeforeAndAfterAll, FlatSpec, Matchers}
 
 import scala.concurrent.duration._
 import scala.concurrent.{Await, Awaitable}
 
-class NioMicroserviceTest extends FlatSpec with Matchers with EmbeddedKafka with StrictLogging {
+class NioMicroserviceTest extends FlatSpec with Matchers with EmbeddedKafka with StrictLogging with BeforeAndAfterAll {
   "NioMicroservice" should "work" in {
     withRunningKafka {
       var n = 0
@@ -30,9 +30,7 @@ class NioMicroserviceTest extends FlatSpec with Matchers with EmbeddedKafka with
       records.size should equal(3)
       records should contain allOf("foobar1", "foobar2", "foobar3")
 
-      // NOTE: shutdown takes too long, so we don't actually shut down the microservice here - but it may mess up other
-      // tests, so be careful
-//      await(control.drainAndShutdown()(microservice.system.dispatcher))
+      await(control.drainAndShutdown()(microservice.system.dispatcher))
     }
   }
 
@@ -65,9 +63,7 @@ class NioMicroserviceTest extends FlatSpec with Matchers with EmbeddedKafka with
       records("bar") should contain only "barbaz"
       records("error") should contain only "[test-with-error] had an unexpected exception: foobar"
 
-      // NOTE: shutdown takes too long, so we don't actually shut down the microservice here - but it may mess up other
-      // tests, so be careful
-//      await(control.drainAndShutdown()(microservice.system.dispatcher))
+      await(control.drainAndShutdown()(microservice.system.dispatcher))
     }
   }
 
@@ -78,7 +74,7 @@ class NioMicroserviceTest extends FlatSpec with Matchers with EmbeddedKafka with
           throw new RuntimeException("foobar")
         }
       }
-      val after = microservice.isDone
+      val after = microservice.runUntilDone
 
       publishStringMessageToKafka("foo", "quux")
 
@@ -90,4 +86,17 @@ class NioMicroserviceTest extends FlatSpec with Matchers with EmbeddedKafka with
   }
 
   def await[T](x: Awaitable[T]): T = Await.result(x, Duration.Inf)
+
+  // comment this region out to get kafka per test
+  // region OneKafka
+//  override def beforeAll(): Unit = {
+//    EmbeddedKafka.start()
+//  }
+//
+//  override def afterAll(): Unit = {
+//    EmbeddedKafka.stop()
+//  }
+//
+//  def withRunningKafka(body: => Any): Any = body
+  // endregion
 }
