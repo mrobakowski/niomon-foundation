@@ -123,13 +123,17 @@ abstract class NioMicroservice[Input, Output](name: String)
 
     kafkaSource.map { msg =>
       Try {
+        logger.info(s"$name is processing message with id [${msg.record.key()}]...")
         val outputRecord = processRecord(msg.record)
+        logger.info(s"$name successfully processed message with id [${msg.record.key()}]")
 
         new ProducerMessage.Message[String, Output, ConsumerMessage.Committable](
           outputRecord,
           msg.committableOffset
         )
       }.toEither.left.map { e =>
+        logger.error(s"$name errored while processing message with id [${msg.record.key()}]")
+
         new ProducerMessage.Message[String, Throwable, ConsumerMessage.Committable](
           msg.record.toProducerRecord(topic = errorTopic.getOrElse("unused-topic"), value = e),
           msg.committableOffset
