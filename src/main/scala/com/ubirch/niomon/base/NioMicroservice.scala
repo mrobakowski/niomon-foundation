@@ -1,6 +1,7 @@
 package com.ubirch.niomon.base
 
-import java.time.Duration
+import java.time
+import java.util.concurrent.TimeUnit
 
 import akka.Done
 import akka.actor.ActorSystem
@@ -9,14 +10,17 @@ import akka.kafka.scaladsl.Consumer.DrainingControl
 import akka.kafka.scaladsl.{Consumer, Producer}
 import akka.stream.scaladsl.{GraphDSL, Keep, Partition, RunnableGraph, Sink, Source}
 import akka.stream.{ActorMaterializer, SinkShape}
-import com.typesafe.config.{Config, ConfigFactory}
+import com.typesafe.config.{Config, ConfigFactory, ConfigRenderOptions}
 import com.typesafe.scalalogging.StrictLogging
 import com.ubirch.kafka._
 import org.apache.kafka.clients.consumer.{ConsumerConfig, ConsumerRecord}
 import org.apache.kafka.clients.producer.ProducerRecord
 import org.apache.kafka.common.serialization._
+import org.redisson.Redisson
+import org.redisson.api.RedissonClient
 
 import scala.collection.JavaConverters._
+import scala.concurrent.duration._
 import scala.concurrent.{ExecutionContextExecutor, Future}
 import scala.util.Try
 
@@ -51,7 +55,7 @@ abstract class NioMicroservice[Input, Output](name: String)
       .withGroupId(name)
       .withProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest")
       // timeout for closing the producer stage - by default it'll wait for commits for 30 seconds
-      .withStopTimeout(Try(config.getDuration("kafka.stopTimeout")).getOrElse(Duration.ofSeconds(30)))
+      .withStopTimeout(Try(config.getDuration("kafka.stopTimeout")).getOrElse(time.Duration.ofSeconds(30)))
 
   val producerSettingsForSuccess: ProducerSettings[String, Output] =
     ProducerSettings(producerConfig, new StringSerializer, outputPayload.serializer)
@@ -151,6 +155,41 @@ abstract class NioMicroservice[Input, Output](name: String)
     // flatMapped to `drainAndShutdown`, because bare `isShutdown` doesn't propagate errors
     control.isShutdown.flatMap { _ =>
       control.drainAndShutdown()
+    }
+  }
+
+  lazy val redisson: RedissonClient = Redisson.create(
+    Try(appConfig.getConfig("redisson"))
+      .map(_.root().render(ConfigRenderOptions.concise()))
+      .map(org.redisson.config.Config.fromJSON)
+      .getOrElse(new org.redisson.config.Config())
+  )
+
+  val context = new NioMicroservice.Context(redisson, config)
+}
+
+object NioMicroservice {
+  class Context(getRedisson: => RedissonClient, val config: Config) {
+    lazy val redisson: RedissonClient = getRedisson
+
+    def cached[T, K, R](name: String, keyFactory: T => K)(f: T => R): T => R = {
+      val cache = redisson.getMapCache[K, R](name)
+
+      val ttl = config.getDuration(s"$name.timeToLive")
+      val maxIdleTime = config.getDuration(s"$name.maxIdleTime")
+
+      { x: T =>
+        val key = keyFactory(x)
+        val res = cache.get(key)
+
+        if (res != null) {
+          res
+        } else {
+          val freshRes = f(x)
+          cache.fastPut(key, freshRes, ttl.toNanos, TimeUnit.NANOSECONDS, maxIdleTime.toNanos, TimeUnit.NANOSECONDS)
+          freshRes
+        }
+      }
     }
   }
 }
