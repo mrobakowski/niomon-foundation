@@ -16,8 +16,10 @@ import com.ubirch.kafka._
 import org.apache.kafka.clients.consumer.{ConsumerConfig, ConsumerRecord}
 import org.apache.kafka.clients.producer.ProducerRecord
 import org.apache.kafka.common.serialization._
+import org.nustaq.serialization.FSTConfiguration
 import org.redisson.Redisson
 import org.redisson.api.RedissonClient
+import org.redisson.codec.FstCodec
 
 import scala.collection.JavaConverters._
 import scala.concurrent.duration._
@@ -159,10 +161,20 @@ abstract class NioMicroservice[Input, Output](name: String)
   }
 
   lazy val redisson: RedissonClient = Redisson.create(
-    Try(appConfig.getConfig("redisson"))
-      .map(_.root().render(ConfigRenderOptions.concise()))
-      .map(org.redisson.config.Config.fromJSON)
-      .getOrElse(new org.redisson.config.Config())
+    {
+      val conf = Try(appConfig.getConfig("redisson"))
+        .map(_.root().render(ConfigRenderOptions.concise()))
+        .map(org.redisson.config.Config.fromJSON)
+        .getOrElse(new org.redisson.config.Config())
+
+      // force the FST serializer to use serialize everything, because we sometimes want to store POJOs which
+      // aren't `Serializable`
+      if (conf.getCodec.isInstanceOf[FstCodec]) {
+        conf.setCodec(new FstCodec(FSTConfiguration.createDefaultConfiguration().setForceSerializable(true)))
+      }
+
+      conf
+    }
   )
 
   val context = new NioMicroservice.Context(redisson, config)
@@ -172,14 +184,15 @@ object NioMicroservice {
   class Context(getRedisson: => RedissonClient, val config: Config) {
     lazy val redisson: RedissonClient = getRedisson
 
-    def cached[T, K, R](name: String, keyFactory: T => K)(f: T => R): T => R = {
-      val cache = redisson.getMapCache[K, R](name)
+    // for some reason, this doesn't really work with arbitrary key types, so we always use strings for keys
+    def cached[T: CacheKey, R](name: String)(f: T => R): T => R = {
+      val cache = redisson.getMapCache[String, R](name)
 
       val ttl = config.getDuration(s"$name.timeToLive")
       val maxIdleTime = config.getDuration(s"$name.maxIdleTime")
 
       { x: T =>
-        val key = keyFactory(x)
+        val key = implicitly[CacheKey[T]].key(x)
         val res = cache.get(key)
 
         if (res != null) {
@@ -190,6 +203,16 @@ object NioMicroservice {
           freshRes
         }
       }
+    }
+  }
+
+  trait CacheKey[-T] {
+    def key(x: T): String
+  }
+
+  object CacheKey {
+    implicit object ToStringKey extends CacheKey[Any] {
+      override def key(x: Any): String = x.toString
     }
   }
 }
