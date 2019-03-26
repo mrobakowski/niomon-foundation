@@ -181,7 +181,9 @@ abstract class NioMicroservice[Input, Output](name: String)
 }
 
 object NioMicroservice {
-  class Context(getRedisson: => RedissonClient, val config: Config) {
+  def measureTime[R](code: => R, t: Long = System.nanoTime): (R, Long) = (code, System.nanoTime - t)
+
+  class Context(getRedisson: => RedissonClient, val config: Config) extends StrictLogging {
     lazy val redisson: RedissonClient = getRedisson
 
     // for some reason, this doesn't really work with arbitrary key types, so we always use strings for keys
@@ -192,16 +194,22 @@ object NioMicroservice {
       val maxIdleTime = config.getDuration(s"$name.maxIdleTime")
 
       { x: T =>
-        val key = implicitly[CacheKey[T]].key(x)
-        val res = cache.get(key)
+        val (res, time) = measureTime {
+          val key = implicitly[CacheKey[T]].key(x)
+          val res = cache.get(key)
 
-        if (res != null) {
-          res
-        } else {
-          val freshRes = f(x)
-          cache.fastPut(key, freshRes, ttl.toNanos, TimeUnit.NANOSECONDS, maxIdleTime.toNanos, TimeUnit.NANOSECONDS)
-          freshRes
+          if (res != null) {
+            logger.debug(s"Cache hit in [$name] for key [$key]")
+            res
+          } else {
+            logger.debug(s"Cache miss in [$name] for key [$key]")
+            val freshRes = f(x)
+            cache.fastPut(key, freshRes, ttl.toNanos, TimeUnit.NANOSECONDS, maxIdleTime.toNanos, TimeUnit.NANOSECONDS)
+            freshRes
+          }
         }
+        logger.debug(s"Cache lookup in [$name] took $time ns (~${Math.round(time / 1000000.0)} ms)")
+        res
       }
     }
   }
