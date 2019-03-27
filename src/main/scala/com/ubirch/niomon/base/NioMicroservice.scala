@@ -22,7 +22,6 @@ import org.redisson.api.RedissonClient
 import org.redisson.codec.FstCodec
 
 import scala.collection.JavaConverters._
-import scala.concurrent.duration._
 import scala.concurrent.{ExecutionContextExecutor, Future}
 import scala.util.Try
 
