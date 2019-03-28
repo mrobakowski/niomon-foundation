@@ -10,6 +10,7 @@ import akka.kafka.scaladsl.Consumer.DrainingControl
 import akka.kafka.scaladsl.{Consumer, Producer}
 import akka.stream.scaladsl.{GraphDSL, Keep, Partition, RunnableGraph, Sink, Source}
 import akka.stream.{ActorMaterializer, SinkShape}
+import com.niomon.util.{KafkaPayload, TupledFunction}
 import com.typesafe.config.{Config, ConfigFactory, ConfigRenderOptions}
 import com.typesafe.scalalogging.StrictLogging
 import com.ubirch.kafka._
@@ -185,32 +186,48 @@ object NioMicroservice {
   class Context(getRedisson: => RedissonClient, val config: Config) extends StrictLogging {
     lazy val redisson: RedissonClient = getRedisson
 
-    // for some reason, this doesn't really work with arbitrary key types, so we always use strings for keys
-    def cached[T: CacheKey, R](name: String)(f: T => R): T => R = {
-      val cache = redisson.getMapCache[String, R](name)
+    // This cache API is split in two steps (`cached(_).buildCache(_)`) to make type inference happy.
+    // Originally it was just `cached(name)(function)`, but when `shouldCache` parameter was added after the `name`,
+    // it screwed up type inference, because it was lexically before the `function`. And it is the `function` that has
+    // the correct types for the type inference
+    //noinspection TypeAnnotation
+    def cached[F](f: F)(implicit F: TupledFunction[F]) = new CacheBuilder[F, F.Output](f)
 
-      val ttl = config.getDuration(s"$name.timeToLive")
-      val maxIdleTime = config.getDuration(s"$name.maxIdleTime")
+    // V is here just to make type inference possible. V == tupledFunction.Output
+    class CacheBuilder[F, V] private[NioMicroservice](f: F)(implicit val tupledFunction: TupledFunction[F]) {
+      private val tupledF = tupledFunction.tupled(f)
 
-      { x: T =>
-        val (res, time) = measureTime {
-          val key = implicitly[CacheKey[T]].key(x)
-          val res = cache.get(key)
+      // for some reason, this doesn't really work with arbitrary key types, so we always use strings for keys
+      def buildCache(name: String, shouldCache: V => Boolean = { _ => true })
+                    (implicit cacheKey: CacheKey[tupledFunction.TupledInput]): F = {
+        val cache = redisson.getMapCache[String, tupledFunction.Output](name)
 
-          if (res != null) {
-            logger.debug(s"Cache hit in [$name] for key [$key]")
-            res
-          } else {
-            logger.debug(s"Cache miss in [$name] for key [$key]")
-            val freshRes = f(x)
-            cache.fastPut(key, freshRes, ttl.toNanos, TimeUnit.NANOSECONDS, maxIdleTime.toNanos, TimeUnit.NANOSECONDS)
-            freshRes
+        val ttl = config.getDuration(s"$name.timeToLive")
+        val maxIdleTime = config.getDuration(s"$name.maxIdleTime")
+
+        tupledFunction.untupled { x: tupledFunction.TupledInput =>
+          val (res, time) = measureTime {
+            val key = cacheKey.key(x)
+            val res = cache.get(key)
+
+            if (res != null) {
+              logger.debug(s"Cache hit in [$name] for key [$key]")
+              res
+            } else {
+              logger.debug(s"Cache miss in [$name] for key [$key]")
+              val freshRes = tupledF(x)
+              if (shouldCache(freshRes.asInstanceOf[V])) {
+                cache.fastPut(key, freshRes, ttl.toNanos, TimeUnit.NANOSECONDS, maxIdleTime.toNanos, TimeUnit.NANOSECONDS)
+              }
+              freshRes
+            }
           }
+          logger.debug(s"Cache lookup in [$name] took $time ns (~${Math.round(time / 1000000.0)} ms)")
+          res
         }
-        logger.debug(s"Cache lookup in [$name] took $time ns (~${Math.round(time / 1000000.0)} ms)")
-        res
       }
     }
+
   }
 
   trait CacheKey[-T] {
@@ -218,8 +235,11 @@ object NioMicroservice {
   }
 
   object CacheKey {
+
     implicit object ToStringKey extends CacheKey[Any] {
       override def key(x: Any): String = x.toString
     }
+
   }
+
 }

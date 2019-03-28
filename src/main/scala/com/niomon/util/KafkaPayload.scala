@@ -1,4 +1,4 @@
-package com.ubirch.niomon.base
+package com.niomon.util
 
 import com.ubirch.kafka.{EnvelopeDeserializer, EnvelopeSerializer, MessageEnvelope}
 import org.apache.kafka.common.serialization._
