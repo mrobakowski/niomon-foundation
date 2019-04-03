@@ -23,8 +23,8 @@ import org.redisson.api.RedissonClient
 import org.redisson.codec.FstCodec
 
 import scala.collection.JavaConverters._
-import scala.concurrent.{ExecutionContextExecutor, Future}
-import scala.util.Try
+import scala.concurrent.{ExecutionContext, ExecutionContextExecutor, Future}
+import scala.util.{Failure, Success, Try}
 
 abstract class NioMicroservice[Input, Output](name: String)
                                              (implicit inputPayload: KafkaPayload[Input],
@@ -133,14 +133,14 @@ abstract class NioMicroservice[Input, Output](name: String)
         val outputRecord = processRecord(msg.record)
         logger.info(s"$name successfully processed message with id [${msg.record.key()}]")
 
-        new ProducerMessage.Message[String, Output, ConsumerMessage.Committable](
+        new ProducerMsg(
           outputRecord,
           msg.committableOffset
         )
       }.toEither.left.map { e =>
         logger.error(s"$name errored while processing message with id [${msg.record.key()}]")
 
-        new ProducerMessage.Message[String, Throwable, ConsumerMessage.Committable](
+        new ProducerErr(
           msg.record.toProducerRecord(topic = errorTopic.getOrElse("unused-topic"), value = e),
           msg.committableOffset
         )
@@ -158,6 +158,11 @@ abstract class NioMicroservice[Input, Output](name: String)
     control.isShutdown.flatMap { _ =>
       control.drainAndShutdown()
     }
+  }
+
+  def runUntilDoneAndShutdownProcess: Future[Done] = {
+    // real impl is in the companion object, so we can conveniently change the execution context
+    NioMicroservice.runUntilDoneAndShutdownProcess(this)
   }
 
   lazy val redisson: RedissonClient = Redisson.create(
@@ -181,6 +186,27 @@ abstract class NioMicroservice[Input, Output](name: String)
 }
 
 object NioMicroservice {
+  private def runUntilDoneAndShutdownProcess(that: NioMicroservice[_, _]): Future[Done] = {
+    // different execution context, because we cannot rely on actor system's dispatcher after it has been terminated
+    import ExecutionContext.Implicits.global
+
+    that.runUntilDone.transform(Success(_)) flatMap { done =>
+      that.system.terminate().map(_ => done)
+    } transform { done =>
+      done.flatten match {
+        case Success(_) =>
+          that.logger.info("Exiting app successfully")
+          System.exit(0)
+        case Failure(e) =>
+          that.logger.error("Exiting app after error", e)
+          System.exit(1)
+      }
+
+      //noinspection NotImplementedCode
+      ??? // unreachable
+    }
+  }
+
   def measureTime[R](code: => R, t: Long = System.nanoTime): (R, Long) = (code, System.nanoTime - t)
 
   class Context(getRedisson: => RedissonClient, val config: Config) extends StrictLogging {
