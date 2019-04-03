@@ -169,7 +169,7 @@ abstract class NioMicroservice[Input, Output](name: String)
 
       // force the FST serializer to use serialize everything, because we sometimes want to store POJOs which
       // aren't `Serializable`
-      if (conf.getCodec.isInstanceOf[FstCodec]) {
+      if (conf.getCodec == null || conf.getCodec.isInstanceOf[FstCodec]) {
         conf.setCodec(new FstCodec(FSTConfiguration.createDefaultConfiguration().setForceSerializable(true)))
       }
 
