@@ -75,7 +75,9 @@ abstract class NioMicroservice[Input, Output](name: String)
     Consumer.committableSource(consumerSettings, Subscriptions.topics(inputTopics: _*))
 
   val kafkaSuccessSink: Sink[ProducerMsg, Future[Done]] =
-    Producer.committableSink(producerSettingsForSuccess)
+    Producer.committableSink(producerSettingsForSuccess).contramap { msg: ProducerMsg =>
+      msg.copy(record = msg.record.withExtraHeaders("previous-microservice" -> name))
+    }
 
   val kafkaErrorSink: Sink[ProducerErr, Future[Done]] = errorTopic match {
     case Some(et) =>
@@ -141,7 +143,8 @@ abstract class NioMicroservice[Input, Output](name: String)
         logger.error(s"$name errored while processing message with id [${msg.record.key()}]")
 
         new ProducerErr(
-          msg.record.toProducerRecord(topic = errorTopic.getOrElse("unused-topic"), value = e),
+          msg.record.toProducerRecord(topic = errorTopic.getOrElse("unused-topic"), value = e)
+            .withExtraHeaders("previous-microservice" -> name),
           msg.committableOffset
         )
       }
