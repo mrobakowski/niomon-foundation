@@ -10,6 +10,7 @@ import akka.kafka.scaladsl.Consumer.DrainingControl
 import akka.kafka.scaladsl.{Consumer, Producer}
 import akka.stream.scaladsl.{GraphDSL, Keep, Partition, RunnableGraph, Sink, Source}
 import akka.stream.{ActorMaterializer, SinkShape}
+import com.fasterxml.jackson.databind.ObjectMapper
 import com.typesafe.config.{Config, ConfigFactory, ConfigRenderOptions}
 import com.typesafe.scalalogging.StrictLogging
 import com.ubirch.kafka._
@@ -22,6 +23,7 @@ import org.redisson.Redisson
 import org.redisson.api.RedissonClient
 import org.redisson.codec.FstCodec
 
+import scala.annotation.tailrec
 import scala.collection.JavaConverters._
 import scala.concurrent.{ExecutionContext, ExecutionContextExecutor, Future}
 import scala.util.{Failure, Success, Try}
@@ -85,8 +87,10 @@ abstract class NioMicroservice[Input, Output](name: String)
         .contramap { errMsg: ProducerErr =>
           val exception = errMsg.record.value()
           logger.error(s"error sink has received an exception, sending on [$et]", exception)
-          errMsg.copy(record = errMsg.record.copy(topic = et, value =
-            s"[$name] had an unexpected exception: " + exception.getMessage))
+
+          val stringifiedException = stringifyException(exception)
+
+          errMsg.copy(record = errMsg.record.copy(topic = et, value = stringifiedException))
         }
     case None =>
       Sink.foreach { errMsg: ProducerErr =>
@@ -97,6 +101,24 @@ abstract class NioMicroservice[Input, Output](name: String)
           throw exception
         }
       }
+  }
+
+  private val OM = new ObjectMapper()
+  def stringifyException(exception: Throwable): String = {
+    import scala.collection.JavaConverters._
+
+    val errMsg = exception.getMessage
+
+    @tailrec def causes(exc: Throwable, acc: Vector[String]): Vector[String] = {
+      val cause = exc.getCause
+      if (cause != null) {
+        causes(cause, acc :+ cause.getMessage)
+      } else {
+        acc
+      }
+    }
+
+    OM.writeValueAsString(Map("error" -> errMsg, "causes" -> causes(exception, Vector.empty).asJava).asJava)
   }
 
   def processRecord(input: ConsumerRecord[String, Input]): ProducerRecord[String, Output] = {
@@ -142,11 +164,17 @@ abstract class NioMicroservice[Input, Output](name: String)
       }.toEither.left.map { e =>
         logger.error(s"$name errored while processing message with id [${msg.record.key()}]")
 
-        new ProducerErr(
-          msg.record.toProducerRecord(topic = errorTopic.getOrElse("unused-topic"), value = e)
-            .withExtraHeaders("previous-microservice" -> name),
-          msg.committableOffset
-        )
+        var prodRecord = msg.record.toProducerRecord(topic = errorTopic.getOrElse("unused-topic"), value = e)
+          .withExtraHeaders("previous-microservice" -> name)
+
+        val headers = prodRecord.headersScala
+        val httpStatusCodeKey = "http-status-code"
+
+        if (!headers.contains(httpStatusCodeKey) || headers(httpStatusCodeKey)(0) <= '2') {
+          prodRecord = prodRecord.withExtraHeaders(httpStatusCodeKey -> "500")
+        }
+
+        new ProducerErr(prodRecord, msg.committableOffset)
       }
     }.toMat(sink)(Keep.both).mapMaterializedValue(DrainingControl.apply)
   }
