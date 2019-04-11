@@ -61,7 +61,7 @@ class NioMicroserviceTest extends FlatSpec with Matchers with EmbeddedKafka with
       records.size should equal(2)
       records.keys should contain only ("bar", "error")
       records("bar") should contain only "barbaz"
-      records("error") should contain only "[test-with-error] had an unexpected exception: foobar"
+      records("error") should contain only """{"error":"RuntimeException: foobar","causes":[]}"""
 
       await(control.drainAndShutdown()(microservice.system.dispatcher))
     }

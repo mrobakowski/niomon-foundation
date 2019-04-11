@@ -14,6 +14,7 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.typesafe.config.{Config, ConfigFactory, ConfigRenderOptions}
 import com.typesafe.scalalogging.StrictLogging
 import com.ubirch.kafka._
+import com.ubirch.niomon.base.NioMicroservice.WithHttpStatus
 import com.ubirch.niomon.util.{KafkaPayload, TupledFunction}
 import org.apache.kafka.clients.consumer.{ConsumerConfig, ConsumerRecord}
 import org.apache.kafka.clients.producer.ProducerRecord
@@ -85,12 +86,22 @@ abstract class NioMicroservice[Input, Output](name: String)
     case Some(et) =>
       Producer.committableSink(producerSettingsForError)
         .contramap { errMsg: ProducerErr =>
-          val exception = errMsg.record.value()
+          val (exception, status) = errMsg.record.value() match {
+            case WithHttpStatus(s, cause) => (cause, Some(s))
+            case e => (e, None)
+          }
+
           logger.error(s"error sink has received an exception, sending on [$et]", exception)
 
           val stringifiedException = stringifyException(exception)
 
-          errMsg.copy(record = errMsg.record.copy(topic = et, value = stringifiedException))
+          val errRecord: ProducerRecord[String, String] = errMsg.record.copy(topic = et, value = stringifiedException)
+          val errRecordWithStatus = status match {
+            case Some(s) => errRecord.withExtraHeaders("http-status-code" -> s.toString)
+            case None => errRecord
+          }
+
+          errMsg.copy(record = errRecordWithStatus)
         }
     case None =>
       Sink.foreach { errMsg: ProducerErr =>
@@ -108,17 +119,19 @@ abstract class NioMicroservice[Input, Output](name: String)
     import scala.collection.JavaConverters._
 
     val errMsg = exception.getMessage
+    val errName = exception.getClass.getSimpleName
 
     @tailrec def causes(exc: Throwable, acc: Vector[String]): Vector[String] = {
       val cause = exc.getCause
       if (cause != null) {
-        causes(cause, acc :+ cause.getMessage)
+        val errName = cause.getClass.getSimpleName
+        causes(cause, acc :+ s"$errName: ${cause.getMessage}")
       } else {
         acc
       }
     }
 
-    OM.writeValueAsString(Map("error" -> errMsg, "causes" -> causes(exception, Vector.empty).asJava).asJava)
+    OM.writeValueAsString(Map("error" -> s"$errName: $errMsg", "causes" -> causes(exception, Vector.empty).asJava).asJava)
   }
 
   def processRecord(input: ConsumerRecord[String, Input]): ProducerRecord[String, Output] = {
@@ -299,4 +312,5 @@ object NioMicroservice {
 
   }
 
+  case class WithHttpStatus(status: Int, cause: Throwable) extends Exception(cause)
 }
