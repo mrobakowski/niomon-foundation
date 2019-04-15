@@ -93,7 +93,7 @@ abstract class NioMicroservice[Input, Output](name: String)
 
           logger.error(s"error sink has received an exception, sending on [$et]", exception)
 
-          val stringifiedException = stringifyException(exception)
+          val stringifiedException = stringifyException(exception, errMsg.record.key())
 
           val errRecord: ProducerRecord[String, String] = errMsg.record.copy(topic = et, value = stringifiedException)
           val errRecordWithStatus = status match {
@@ -115,7 +115,7 @@ abstract class NioMicroservice[Input, Output](name: String)
   }
 
   private val OM = new ObjectMapper()
-  def stringifyException(exception: Throwable): String = {
+  def stringifyException(exception: Throwable, requestId: String): String = {
     import scala.collection.JavaConverters._
 
     val errMsg = exception.getMessage
@@ -131,7 +131,12 @@ abstract class NioMicroservice[Input, Output](name: String)
       }
     }
 
-    OM.writeValueAsString(Map("error" -> s"$errName: $errMsg", "causes" -> causes(exception, Vector.empty).asJava).asJava)
+    OM.writeValueAsString(Map(
+      "error" -> s"$errName: $errMsg",
+      "causes" -> causes(exception, Vector.empty).asJava,
+      "microservice" -> name,
+      "requestId" -> requestId
+    ).asJava)
   }
 
   def processRecord(input: ConsumerRecord[String, Input]): ProducerRecord[String, Output] = {
