@@ -52,11 +52,6 @@
     <dependencies>
         <dependency>
             <groupId>com.ubirch</groupId>
-            <artifactId>ubirch-protocol-java</artifactId>
-            <version>${ubirch-protocol-java.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>com.ubirch</groupId>
             <artifactId>ubirch-kafka-envelope</artifactId>
             <version>${ubirch-kafka-envelope.version}</version>
         </dependency>
