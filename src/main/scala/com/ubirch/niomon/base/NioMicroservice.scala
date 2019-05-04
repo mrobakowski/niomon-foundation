@@ -47,6 +47,13 @@ abstract class NioMicroservice[Input, Output](name: String)
       case cce: ClassCastException => throw new RuntimeException("values in `kafka.topic.outgoing` must be string", cce)
     }
   }(scala.collection.breakOut)
+
+  lazy val onlyOutputTopic: String = {
+    if (outputTopics.size != 1)
+      throw new IllegalStateException("you cannot use `onlyOutputTopic` with multiple output topics defined!")
+    outputTopics.values.head
+  }
+
   val errorTopic: Option[String] = Try(config.getString("kafka.topic.error")).toOption
   val failOnGraphException: Boolean = Try(config.getBoolean("failGraphOnException")).getOrElse(true)
 
@@ -235,7 +242,7 @@ abstract class NioMicroservice[Input, Output](name: String)
 }
 
 object NioMicroservice {
-  private def runUntilDoneAndShutdownProcess(that: NioMicroservice[_, _]): Future[Done] = {
+  private def runUntilDoneAndShutdownProcess(that: NioMicroservice[_, _]): Future[Nothing] = {
     // different execution context, because we cannot rely on actor system's dispatcher after it has been terminated
     import ExecutionContext.Implicits.global
 
