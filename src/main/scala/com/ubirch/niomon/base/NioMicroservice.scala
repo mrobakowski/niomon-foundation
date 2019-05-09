@@ -15,7 +15,7 @@ import com.typesafe.config.{Config, ConfigFactory, ConfigRenderOptions}
 import com.typesafe.scalalogging.StrictLogging
 import com.ubirch.kafka._
 import com.ubirch.niomon.base.NioMicroservice.WithHttpStatus
-import com.ubirch.niomon.util.{KafkaPayload, TupledFunction}
+import com.ubirch.niomon.util.{KafkaPayload, KafkaPayloadFactory, TupledFunction}
 import org.apache.kafka.clients.consumer.{ConsumerConfig, ConsumerRecord}
 import org.apache.kafka.clients.producer.ProducerRecord
 import org.apache.kafka.common.serialization._
@@ -30,8 +30,8 @@ import scala.concurrent.{ExecutionContext, ExecutionContextExecutor, Future}
 import scala.util.{Failure, Success, Try}
 
 abstract class NioMicroservice[Input, Output](name: String)
-                                             (implicit inputPayload: KafkaPayload[Input],
-                                              outputPayload: KafkaPayload[Output])
+                                             (implicit inputPayloadFactory: KafkaPayloadFactory[Input],
+                                              outputPayloadFactory: KafkaPayloadFactory[Output])
   extends StrictLogging {
   implicit val system: ActorSystem = ActorSystem(name)
   implicit val materializer: ActorMaterializer = ActorMaterializer()
@@ -39,6 +39,26 @@ abstract class NioMicroservice[Input, Output](name: String)
 
   val appConfig: Config = ConfigFactory.load() // TODO: should this just be system.settings.config?
   val config: Config = appConfig.getConfig(name)
+
+  lazy val redisson: RedissonClient = Redisson.create(
+    {
+      val conf = Try(appConfig.getConfig("redisson"))
+        .map(_.root().render(ConfigRenderOptions.concise()))
+        .map(org.redisson.config.Config.fromJSON)
+        .getOrElse(new org.redisson.config.Config())
+
+      // force the FST serializer to use serialize everything, because we sometimes want to store POJOs which
+      // aren't `Serializable`
+      if (conf.getCodec == null || conf.getCodec.isInstanceOf[FstCodec]) {
+        conf.setCodec(new FstCodec(FSTConfiguration.createDefaultConfiguration().setForceSerializable(true)))
+      }
+
+      conf
+    }
+  )
+
+  val context = new NioMicroservice.Context(redisson, config)
+
   val inputTopics: Seq[String] = config.getStringList("kafka.topic.incoming").asScala
   val outputTopics: Map[String, String] = config.getConfig("kafka.topic.outgoing").entrySet().asScala.map { e =>
     try {
@@ -60,6 +80,9 @@ abstract class NioMicroservice[Input, Output](name: String)
   val kafkaUrl: String = config.getString("kafka.url")
   val consumerConfig: Config = system.settings.config.getConfig("akka.kafka.consumer")
   val producerConfig: Config = system.settings.config.getConfig("akka.kafka.producer")
+
+  implicit val inputPayload: KafkaPayload[Input] = inputPayloadFactory(context)
+  implicit val outputPayload: KafkaPayload[Output] = outputPayloadFactory(context)
 
   val consumerSettings: ConsumerSettings[String, Input] =
     ConsumerSettings(consumerConfig, new StringDeserializer, inputPayload.deserializer)
@@ -152,7 +175,8 @@ abstract class NioMicroservice[Input, Output](name: String)
   }
 
   def process(input: Input): (Output, String) = throw new NotImplementedError(
-    "at least one of {process, processRecord} must be overridden")
+    "at least one of {process, processRecord} must be overridden"
+  )
 
   def graph: RunnableGraph[DrainingControl[Done]] = {
     val bothDone: (Future[Done], Future[Done]) => Future[Done] = (f1, f2) =>
@@ -179,7 +203,13 @@ abstract class NioMicroservice[Input, Output](name: String)
     kafkaSource.map { msg =>
       Try {
         logger.info(s"$name is processing message with id [${msg.record.key()}]...")
-        val outputRecord = processRecord(msg.record)
+        val outputRecord = {
+          val res = processRecord(msg.record)
+          msg.record.headersScala.get("force-reply-to") match {
+            case Some(destination) => res.copy(topic = destination)
+            case None => res
+          }
+        }
         logger.info(s"$name successfully processed message with id [${msg.record.key()}]")
 
         new ProducerMsg(
@@ -220,25 +250,6 @@ abstract class NioMicroservice[Input, Output](name: String)
     // real impl is in the companion object, so we can conveniently change the execution context
     NioMicroservice.runUntilDoneAndShutdownProcess(this)
   }
-
-  lazy val redisson: RedissonClient = Redisson.create(
-    {
-      val conf = Try(appConfig.getConfig("redisson"))
-        .map(_.root().render(ConfigRenderOptions.concise()))
-        .map(org.redisson.config.Config.fromJSON)
-        .getOrElse(new org.redisson.config.Config())
-
-      // force the FST serializer to use serialize everything, because we sometimes want to store POJOs which
-      // aren't `Serializable`
-      if (conf.getCodec == null || conf.getCodec.isInstanceOf[FstCodec]) {
-        conf.setCodec(new FstCodec(FSTConfiguration.createDefaultConfiguration().setForceSerializable(true)))
-      }
-
-      conf
-    }
-  )
-
-  val context = new NioMicroservice.Context(redisson, config)
 }
 
 object NioMicroservice {
