@@ -21,7 +21,7 @@ import org.apache.kafka.clients.producer.ProducerRecord
 import org.apache.kafka.common.serialization._
 import org.nustaq.serialization.FSTConfiguration
 import org.redisson.Redisson
-import org.redisson.api.RedissonClient
+import org.redisson.api.{RMapCache, RedissonClient}
 import org.redisson.codec.FstCodec
 
 import scala.annotation.tailrec
@@ -30,8 +30,8 @@ import scala.concurrent.{ExecutionContext, ExecutionContextExecutor, Future}
 import scala.util.{Failure, Success, Try}
 
 abstract class NioMicroservice[Input, Output](name: String)
-                                             (implicit inputPayloadFactory: KafkaPayloadFactory[Input],
-                                              outputPayloadFactory: KafkaPayloadFactory[Output])
+  (implicit inputPayloadFactory: KafkaPayloadFactory[Input],
+    outputPayloadFactory: KafkaPayloadFactory[Output])
   extends StrictLogging {
   implicit val system: ActorSystem = ActorSystem(name)
   implicit val materializer: ActorMaterializer = ActorMaterializer()
@@ -39,6 +39,10 @@ abstract class NioMicroservice[Input, Output](name: String)
 
   val appConfig: Config = ConfigFactory.load() // TODO: should this just be system.settings.config?
   val config: Config = appConfig.getConfig(name)
+
+  var caches: Vector[RMapCache[_, _]] = Vector()
+
+  def purgeCaches(): Unit = caches.foreach(_.clear())
 
   lazy val redisson: RedissonClient = Redisson.create(
     {
@@ -57,7 +61,7 @@ abstract class NioMicroservice[Input, Output](name: String)
     }
   )
 
-  val context = new NioMicroservice.Context(redisson, config)
+  val context = new NioMicroservice.Context(redisson, config, caches :+= _)
 
   val inputTopics: Seq[String] = config.getStringList("kafka.topic.incoming").asScala
   val outputTopics: Map[String, String] = config.getConfig("kafka.topic.outgoing").entrySet().asScala.map { e =>
@@ -145,6 +149,7 @@ abstract class NioMicroservice[Input, Output](name: String)
   }
 
   private val OM = new ObjectMapper()
+
   def stringifyException(exception: Throwable, requestId: String): String = {
     import scala.collection.JavaConverters._
 
@@ -203,9 +208,12 @@ abstract class NioMicroservice[Input, Output](name: String)
     kafkaSource.map { msg =>
       Try {
         logger.info(s"$name is processing message with id [${msg.record.key()}]...")
+        val msgHeaders = msg.record.headersScala
+        if (msgHeaders.contains("x-niomon-purge-caches")) purgeCaches()
+
         val outputRecord = {
           val res = processRecord(msg.record)
-          msg.record.headersScala.get("force-reply-to") match {
+          msgHeaders.get("x-niomon-force-reply-to") match {
             case Some(destination) => res.copy(topic = destination)
             case None => res
           }
@@ -276,7 +284,7 @@ object NioMicroservice {
 
   def measureTime[R](code: => R, t: Long = System.nanoTime): (R, Long) = (code, System.nanoTime - t)
 
-  class Context(getRedisson: => RedissonClient, val config: Config) extends StrictLogging {
+  class Context(getRedisson: => RedissonClient, val config: Config, registerCache: RMapCache[_, _] => Unit = { _ => }) extends StrictLogging {
     lazy val redisson: RedissonClient = getRedisson
 
     // This cache API is split in two steps (`cached(_).buildCache(_)`) to make type inference happy.
@@ -292,8 +300,9 @@ object NioMicroservice {
 
       // for some reason, this doesn't really work with arbitrary key types, so we always use strings for keys
       def buildCache(name: String, shouldCache: V => Boolean = { _ => true })
-                    (implicit cacheKey: CacheKey[tupledFunction.TupledInput]): F = {
+        (implicit cacheKey: CacheKey[tupledFunction.TupledInput]): F = {
         val cache = redisson.getMapCache[String, tupledFunction.Output](name)
+        registerCache(cache)
 
         val ttl = config.getDuration(s"$name.timeToLive")
         val maxIdleTime = config.getDuration(s"$name.maxIdleTime")
@@ -336,4 +345,5 @@ object NioMicroservice {
   }
 
   case class WithHttpStatus(status: Int, cause: Throwable) extends Exception(cause)
+
 }
