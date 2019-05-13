@@ -6,6 +6,7 @@ import java.util.concurrent.TimeUnit
 import akka.Done
 import akka.actor.ActorSystem
 import akka.kafka._
+import akka.kafka.scaladsl.Committer
 import akka.kafka.scaladsl.Consumer.DrainingControl
 import akka.kafka.scaladsl.{Consumer, Producer}
 import akka.stream.scaladsl.{GraphDSL, Keep, Partition, RunnableGraph, Sink, Source}
@@ -79,16 +80,16 @@ abstract class NioMicroservice[Input, Output](name: String)
   }
 
   val errorTopic: Option[String] = Try(config.getString("kafka.topic.error")).toOption
-  val failOnGraphException: Boolean = Try(config.getBoolean("failGraphOnException")).getOrElse(true)
+  val failOnGraphException: Boolean = Try(config.getBoolean("failOnGraphException")).getOrElse(true)
 
   val kafkaUrl: String = config.getString("kafka.url")
   val consumerConfig: Config = system.settings.config.getConfig("akka.kafka.consumer")
   val producerConfig: Config = system.settings.config.getConfig("akka.kafka.producer")
 
-  implicit val inputPayload: KafkaPayload[Input] = inputPayloadFactory(context)
+  implicit val inputPayload: KafkaPayload[Try[Input]] = KafkaPayload.tryDeserializePayload(inputPayloadFactory(context))
   implicit val outputPayload: KafkaPayload[Output] = outputPayloadFactory(context)
 
-  val consumerSettings: ConsumerSettings[String, Input] =
+  val consumerSettings: ConsumerSettings[String, Try[Input]] =
     ConsumerSettings(consumerConfig, new StringDeserializer, inputPayload.deserializer)
       .withBootstrapServers(kafkaUrl)
       .withGroupId(name)
@@ -104,7 +105,7 @@ abstract class NioMicroservice[Input, Output](name: String)
     ProducerSettings(producerConfig, new StringSerializer, new StringSerializer)
       .withBootstrapServers(kafkaUrl)
 
-  final type ConsumerMsg = ConsumerMessage.CommittableMessage[String, Input]
+  final type ConsumerMsg = ConsumerMessage.CommittableMessage[String, Try[Input]]
   final type ProducerMsg = ProducerMessage.Message[String, Output, ConsumerMessage.Committable]
   final type ProducerErr = ProducerMessage.Message[String, Throwable, ConsumerMessage.Committable]
 
@@ -138,13 +139,15 @@ abstract class NioMicroservice[Input, Output](name: String)
           errMsg.copy(record = errRecordWithStatus)
         }
     case None =>
-      Sink.foreach { errMsg: ProducerErr =>
+      Committer.sink(CommitterSettings(system)).contramap { errMsg: ProducerErr =>
         val exception = errMsg.record.value()
         logger.error("error sink has received an exception", exception)
         if (failOnGraphException) {
           logger.error("failOnGraphException set to true, rethrowing")
           throw exception
         }
+
+        errMsg.passThrough
       }
   }
 
@@ -212,13 +215,14 @@ abstract class NioMicroservice[Input, Output](name: String)
         if (msgHeaders.contains("x-niomon-purge-caches")) purgeCaches()
 
         val outputRecord = {
-          val res = processRecord(msg.record)
+          val msgDeserializationErrorsRethrown = msg.record.copy(value = msg.record.value().get)
+          val res = processRecord(msgDeserializationErrorsRethrown)
           msgHeaders.get("x-niomon-force-reply-to") match {
             case Some(destination) => res.copy(topic = destination)
             case None => res
           }
         }
-        logger.info(s"$name successfully processed message with id [${msg.record.key()}]")
+        logger.info(s"$name successfully processed message with id [${outputRecord.key()}]")
 
         new ProducerMsg(
           outputRecord,

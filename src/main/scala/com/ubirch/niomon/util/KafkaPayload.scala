@@ -103,4 +103,34 @@ object KafkaPayload {
       }
     }
   }
+
+  def tryDeserializePayload[T](inner: KafkaPayload[T]): KafkaPayload[Try[T]] = {
+    new KafkaPayload[Try[T]] {
+      override def deserializer: Deserializer[Try[T]] = tryDeserializer(inner.deserializer)
+
+      override def serializer: Serializer[Try[T]] = successSerializer(inner.serializer)
+    }
+  }
+
+  private def tryDeserializer[T](deserializer: Deserializer[T]): Deserializer[Try[T]] = {
+    new Deserializer[Try[T]] {
+      override def configure(configs: util.Map[String, _], isKey: Boolean): Unit = deserializer.configure(configs, isKey)
+
+      override def deserialize(topic: String, data: Array[Byte]): Try[T] = Try(deserializer.deserialize(topic, data))
+
+      override def close(): Unit = deserializer.close()
+    }
+  }
+
+  private def successSerializer[T](serializer: Serializer[T]): Serializer[Try[T]] = {
+    new Serializer[Try[T]] {
+      override def configure(configs: util.Map[String, _], isKey: Boolean): Unit = serializer.configure(configs, isKey)
+
+      override def serialize(topic: String, data: Try[T]): Array[Byte] = {
+        serializer.serialize(topic, data.getOrElse(throw data.failed.get))
+      }
+
+      override def close(): Unit = serializer.close()
+    }
+  }
 }
