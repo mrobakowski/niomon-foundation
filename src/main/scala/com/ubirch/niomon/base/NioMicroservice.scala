@@ -212,7 +212,7 @@ abstract class NioMicroservice[Input, Output](name: String)
       Try {
         logger.info(s"$name is processing message with id [${msg.record.key()}]...")
         val msgHeaders = msg.record.headersScala
-        if (msgHeaders.contains("x-niomon-purge-caches")) purgeCaches()
+        if (msgHeaders.keys.map(_.toLowerCase).exists(_ == "x-niomon-purge-caches")) purgeCaches()
 
         val outputRecord = {
           val msgDeserializationErrorsRethrown = msg.record.copy(value = msg.record.value().get)
