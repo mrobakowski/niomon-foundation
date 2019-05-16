@@ -43,7 +43,11 @@ abstract class NioMicroservice[Input, Output](name: String)
 
   var caches: Vector[RMapCache[_, _]] = Vector()
 
-  def purgeCaches(): Unit = caches.foreach(_.clear())
+  def purgeCaches(): Unit = {
+    logger.info("purging caches!")
+    caches.foreach(_.clear())
+    logger.debug(s"cache sizes after purging: [${caches.map(c => c.getName + " => " + c.size()).mkString("; ")}]")
+  }
 
   lazy val redisson: RedissonClient = Redisson.create(
     {
@@ -62,7 +66,11 @@ abstract class NioMicroservice[Input, Output](name: String)
     }
   )
 
-  val context = new NioMicroservice.Context(redisson, config, caches :+= _)
+  val context = new NioMicroservice.Context(redisson, config, { c =>
+    logger.debug("registering new cache")
+    caches :+= c
+    logger.debug(s"caches in total: ${caches.size}")
+  })
 
   val inputTopics: Seq[String] = config.getStringList("kafka.topic.incoming").asScala
   val outputTopics: Map[String, String] = config.getConfig("kafka.topic.outgoing").entrySet().asScala.map { e =>
@@ -210,7 +218,7 @@ abstract class NioMicroservice[Input, Output](name: String)
 
     kafkaSource.map { msg =>
       Try {
-        logger.info(s"$name is processing message with id [${msg.record.key()}]...")
+        logger.info(s"$name is processing message with id [${msg.record.key()}] and headers [${msg.record.headersScala}]...")
         val msgHeaders = msg.record.headersScala
         if (msgHeaders.keys.map(_.toLowerCase).exists(_ == "x-niomon-purge-caches")) purgeCaches()
 
