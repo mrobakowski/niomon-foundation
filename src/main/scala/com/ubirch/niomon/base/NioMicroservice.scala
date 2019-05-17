@@ -190,9 +190,10 @@ abstract class NioMicroservice[Input, Output](name: String)
     input.toProducerRecord(topic = outputTopics(topicKey), value = output)
   }
 
-  def process(input: Input): (Output, String) = throw new NotImplementedError(
-    "at least one of {process, processRecord} must be overridden"
-  )
+  def process(input: Input): (Output, String) = {
+    val _ = input // dummy usage to silence the warning
+    throw new NotImplementedError("at least one of {process, processRecord} must be overridden")
+  }
 
   def graph: RunnableGraph[DrainingControl[Done]] = {
     val bothDone: (Future[Done], Future[Done]) => Future[Done] = (f1, f2) =>
