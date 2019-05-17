@@ -283,14 +283,11 @@ object NioMicroservice {
       done.flatten match {
         case Success(_) =>
           that.logger.info("Exiting app successfully")
-          System.exit(0)
+          sys.exit(0)
         case Failure(e) =>
           that.logger.error("Exiting app after error", e)
-          System.exit(1)
+          sys.exit(1)
       }
-
-      //noinspection NotImplementedCode
-      ??? // unreachable
     }
   }
 
