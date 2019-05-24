@@ -12,12 +12,12 @@ class NioMicroserviceTest extends FlatSpec with Matchers with EmbeddedKafka with
   "NioMicroservice" should "work" in {
     withRunningKafka {
       var n = 0
-      val microservice = new NioMicroservice[String, String]("test") {
+      val microservice = NioMicroserviceLive[String, String]("test", new NioMicroserviceLogic.Simple(_) {
         override def process(input: String): (String, String) = {
           n += 1
           s"foobar$n" -> "default"
         }
-      }
+      })
 
       val control = microservice.run
 
@@ -36,9 +36,8 @@ class NioMicroserviceTest extends FlatSpec with Matchers with EmbeddedKafka with
 
   it should "send error to error topic and continue to work if error topic configured" in {
     withRunningKafka {
-      //noinspection TypeAnnotation
       // NOTE: look at application.conf in test resources for relevant config
-      val microservice = new NioMicroservice[String, String]("test-with-error") {
+      val microservice = NioMicroserviceLive[String, String]("test-with-error", new NioMicroserviceLogic.Simple(_) {
         var first = true
 
         override def process(input: String): (String, String) = {
@@ -49,7 +48,8 @@ class NioMicroserviceTest extends FlatSpec with Matchers with EmbeddedKafka with
             "barbaz" -> "default"
           }
         }
-      }
+      })
+
       val control = microservice.run
 
       publishStringMessageToKafka("foo", "quux")
@@ -69,11 +69,11 @@ class NioMicroserviceTest extends FlatSpec with Matchers with EmbeddedKafka with
 
   it should "shutdown on error with no error topic configured" in {
     withRunningKafka {
-      val microservice = new NioMicroservice[String, String]("test") {
+      val microservice = NioMicroserviceLive[String, String]("test", new NioMicroserviceLogic.Simple(_) {
         override def process(input: String): (String, String) = {
           throw new RuntimeException("foobar")
         }
-      }
+      })
       val after = microservice.runUntilDone
 
       publishStringMessageToKafka("foo", "quux")
