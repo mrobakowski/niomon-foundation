@@ -10,11 +10,9 @@ import akka.kafka.scaladsl.Consumer.DrainingControl
 import akka.kafka.scaladsl.{Consumer, Producer}
 import akka.stream.scaladsl.{GraphDSL, Keep, Partition, RunnableGraph, Sink, Source}
 import akka.stream.{ActorMaterializer, SinkShape}
-import com.fasterxml.jackson.databind.ObjectMapper
 import com.typesafe.config.{Config, ConfigFactory, ConfigRenderOptions}
 import com.typesafe.scalalogging.StrictLogging
 import com.ubirch.kafka._
-import com.ubirch.niomon.base.NioMicroservice.WithHttpStatus
 import com.ubirch.niomon.util.{KafkaPayload, KafkaPayloadFactory}
 import org.apache.kafka.clients.consumer.{ConsumerConfig, ConsumerRecord}
 import org.apache.kafka.clients.producer.ProducerRecord
@@ -24,13 +22,12 @@ import org.redisson.Redisson
 import org.redisson.api.{RMapCache, RedissonClient}
 import org.redisson.codec.FstCodec
 
-import scala.annotation.tailrec
 import scala.collection.JavaConverters._
 import scala.concurrent.{ExecutionContext, ExecutionContextExecutor, Future}
 import scala.util.{Failure, Success, Try}
 
 final class NioMicroserviceLive[Input, Output](
-  name: String,
+  val name: String,
   logicFactory: NioMicroservice[Input, Output] => NioMicroserviceLogic[Input, Output]
 )(implicit
   inputPayloadFactory: KafkaPayloadFactory[Input],
@@ -115,9 +112,6 @@ final class NioMicroserviceLive[Input, Output](
     ProducerSettings(producerConfig, new StringSerializer, new StringSerializer)
       .withBootstrapServers(kafkaUrl)
 
-  type ConsumerMsg = ConsumerMessage.CommittableMessage[String, Try[Input]]
-  type ProducerMsg = ProducerMessage.Message[String, Output, ConsumerMessage.Committable]
-  type ProducerErr = ProducerMessage.Message[String, Throwable, ConsumerMessage.Committable]
 
   val kafkaSource: Source[ConsumerMsg, Consumer.Control] =
     Consumer.committableSource(consumerSettings, Subscriptions.topics(inputTopics: _*))
@@ -131,21 +125,8 @@ final class NioMicroserviceLive[Input, Output](
     case Some(et) =>
       Producer.committableSink(producerSettingsForError)
         .contramap { errMsg: ProducerErr =>
-          val (exception, status) = errMsg.record.value() match {
-            case WithHttpStatus(s, cause) => (cause, Some(s))
-            case e => (e, None)
-          }
-
-          logger.error(s"error sink has received an exception, sending on [$et]", exception)
-
-          val stringifiedException = stringifyException(exception, errMsg.record.key())
-
-          val errRecord: ProducerRecord[String, String] = errMsg.record.copy(topic = et, value = stringifiedException)
-          val errRecordWithStatus = status match {
-            case Some(s) => errRecord.withExtraHeaders("http-status-code" -> s.toString)
-            case None => errRecord
-          }
-
+          logger.error(s"error sink has received an exception, sending on [$et]", errMsg.record.value())
+          val errRecordWithStatus = producerErrorRecordToStringRecord(errMsg.record, et)
           errMsg.copy(record = errRecordWithStatus)
         }
     case None =>
@@ -159,32 +140,6 @@ final class NioMicroserviceLive[Input, Output](
 
         errMsg.passThrough
       }
-  }
-
-  private val OM = new ObjectMapper()
-
-  def stringifyException(exception: Throwable, requestId: String): String = {
-    import scala.collection.JavaConverters._
-
-    val errMsg = exception.getMessage
-    val errName = exception.getClass.getSimpleName
-
-    @tailrec def causes(exc: Throwable, acc: Vector[String]): Vector[String] = {
-      val cause = exc.getCause
-      if (cause != null) {
-        val errName = cause.getClass.getSimpleName
-        causes(cause, acc :+ s"$errName: ${cause.getMessage}")
-      } else {
-        acc
-      }
-    }
-
-    OM.writeValueAsString(Map(
-      "error" -> s"$errName: $errMsg",
-      "causes" -> causes(exception, Vector.empty).asJava,
-      "microservice" -> name,
-      "requestId" -> requestId
-    ).asJava)
   }
 
   lazy val logic: NioMicroserviceLogic[Input, Output] = logicFactory(this)
@@ -229,24 +184,12 @@ final class NioMicroserviceLive[Input, Output](
         }
         logger.info(s"$name successfully processed message with id [${outputRecord.key()}]")
 
-        new ProducerMsg(
-          outputRecord,
-          msg.committableOffset
-        )
+        new ProducerMsg(outputRecord, msg.committableOffset)
       }.toEither.left.map { e =>
         logger.error(s"$name errored while processing message with id [${msg.record.key()}]")
+        val record = wrapThrowableInKafkaRecord(msg.record, e)
 
-        var prodRecord = msg.record.toProducerRecord(topic = errorTopic.getOrElse("unused-topic"), value = e)
-          .withExtraHeaders("previous-microservice" -> name)
-
-        val headers = prodRecord.headersScala
-        val httpStatusCodeKey = "http-status-code"
-
-        if (!headers.contains(httpStatusCodeKey) || headers(httpStatusCodeKey)(0) <= '2') {
-          prodRecord = prodRecord.withExtraHeaders(httpStatusCodeKey -> "500")
-        }
-
-        new ProducerErr(prodRecord, msg.committableOffset)
+        new ProducerErr(record, msg.committableOffset)
       }
     }.toMat(sink)(Keep.both).mapMaterializedValue(DrainingControl.apply)
   }
@@ -263,7 +206,7 @@ final class NioMicroserviceLive[Input, Output](
     }
   }
 
-  def runUntilDoneAndShutdownProcess: Future[Done] = {
+  def runUntilDoneAndShutdownProcess: Future[Nothing] = {
     // real impl is in the companion object, so we can conveniently change the execution context
     NioMicroserviceLive.runUntilDoneAndShutdownProcess(this)
   }
