@@ -14,6 +14,9 @@ import com.typesafe.config.{Config, ConfigFactory, ConfigRenderOptions}
 import com.typesafe.scalalogging.StrictLogging
 import com.ubirch.kafka._
 import com.ubirch.niomon.util.{KafkaPayload, KafkaPayloadFactory}
+import io.prometheus.client.Counter
+import io.prometheus.client.exporter.HTTPServer
+import io.prometheus.client.hotspot.DefaultExports
 import org.apache.kafka.clients.consumer.{ConsumerConfig, ConsumerRecord}
 import org.apache.kafka.clients.producer.ProducerRecord
 import org.apache.kafka.common.serialization._
@@ -36,6 +39,16 @@ final class NioMicroserviceLive[Input, Output](
   implicit val system: ActorSystem = ActorSystem(name)
   implicit val materializer: ActorMaterializer = ActorMaterializer()
   implicit val executionContext: ExecutionContextExecutor = system.dispatcher
+
+  private val receivedMessagesCounter = Counter
+    .build(s"niomon_${name}_received_messages_count", s"Number of kafka messages received by $name")
+    .register()
+  private val successCounter = Counter
+    .build(s"niomon_${name}_successes_count", s"Number of messages successfully processed by $name")
+    .register()
+  private val failureCounter = Counter
+    .build(s"niomon_${name}_failures_count", s"Number of messages unsuccessfully processed by $name")
+    .register()
 
   val appConfig: Config = ConfigFactory.load() // TODO: should this just be system.settings.config?
   override val config: Config = appConfig.getConfig(name)
@@ -169,6 +182,7 @@ final class NioMicroserviceLive[Input, Output](
       })
 
     kafkaSource.map { msg =>
+      receivedMessagesCounter.inc()
       Try {
         logger.info(s"$name is processing message with id [${msg.record.key()}] and headers [${msg.record.headersScala}]...")
         val msgHeaders = msg.record.headersScala
@@ -183,10 +197,12 @@ final class NioMicroserviceLive[Input, Output](
           }
         }
         logger.info(s"$name successfully processed message with id [${outputRecord.key()}]")
+        successCounter.inc()
 
         new ProducerMsg(outputRecord, msg.committableOffset)
       }.toEither.left.map { e =>
         logger.error(s"$name errored while processing message with id [${msg.record.key()}]")
+        failureCounter.inc()
         val record = wrapThrowableInKafkaRecord(msg.record, e)
 
         new ProducerErr(record, msg.committableOffset)
@@ -195,6 +211,8 @@ final class NioMicroserviceLive[Input, Output](
   }
 
   def run: DrainingControl[Done] = {
+    DefaultExports.initialize()
+    val _ = new HTTPServer(appConfig.getInt("prometheus.port"), true)
     graph.run()
   }
 
