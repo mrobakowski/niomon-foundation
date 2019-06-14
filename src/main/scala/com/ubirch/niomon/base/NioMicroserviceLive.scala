@@ -213,7 +213,9 @@ final class NioMicroserviceLive[Input, Output](
 
   def run: DrainingControl[Done] = {
     DefaultExports.initialize()
-    val _ = new HTTPServer(appConfig.getInt("prometheus.port"), true)
+    if (Try(appConfig.getBoolean("prometheus.enabled")).getOrElse(true)) {
+      val _ = new HTTPServer(appConfig.getInt("prometheus.port"), true)
+    }
     graph.run()
   }
 

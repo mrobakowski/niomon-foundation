@@ -69,7 +69,7 @@ class NioMicroserviceTest extends FlatSpec with Matchers with EmbeddedKafka with
 
   it should "shutdown on error with no error topic configured" in {
     withRunningKafka {
-      val microservice = NioMicroserviceLive[String, String]("test", new NioMicroserviceLogic.Simple(_) {
+      val microservice = NioMicroserviceLive[String, String]("test1", new NioMicroserviceLogic.Simple(_) {
         override def process(input: String): (String, String) = {
           throw new RuntimeException("foobar")
         }
