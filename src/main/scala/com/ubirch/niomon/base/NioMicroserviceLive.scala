@@ -42,13 +42,13 @@ final class NioMicroserviceLive[Input, Output](
 
   private val prometheusFriendlyName = name.replaceAll("-", "_")
   private val receivedMessagesCounter = Counter
-    .build(s"ubirch_niomon_${prometheusFriendlyName}_received_messages_count", s"Number of kafka messages received by $name")
+    .build(s"ubirch_${prometheusFriendlyName}_received_messages_count", s"Number of kafka messages received by $name")
     .register()
   private val successCounter = Counter
-    .build(s"ubirch_niomon_${prometheusFriendlyName}_successes_count", s"Number of messages successfully processed by $name")
+    .build(s"ubirch_${prometheusFriendlyName}_successes_count", s"Number of messages successfully processed by $name")
     .register()
   private val failureCounter = Counter
-    .build(s"ubirch_niomon_${prometheusFriendlyName}_failures_count", s"Number of messages unsuccessfully processed by $name")
+    .build(s"ubirch_${prometheusFriendlyName}_failures_count", s"Number of messages unsuccessfully processed by $name")
     .register()
 
   val appConfig: Config = ConfigFactory.load() // TODO: should this just be system.settings.config?
