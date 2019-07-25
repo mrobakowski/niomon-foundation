@@ -14,7 +14,7 @@ import com.typesafe.config.{Config, ConfigFactory, ConfigRenderOptions}
 import com.typesafe.scalalogging.StrictLogging
 import com.ubirch.kafka._
 import com.ubirch.niomon.util.{KafkaPayload, KafkaPayloadFactory}
-import io.prometheus.client.Counter
+import io.prometheus.client.{Counter, Summary}
 import io.prometheus.client.exporter.HTTPServer
 import io.prometheus.client.hotspot.DefaultExports
 import org.apache.kafka.clients.consumer.{ConsumerConfig, ConsumerRecord}
@@ -40,15 +40,17 @@ final class NioMicroserviceLive[Input, Output](
   implicit val materializer: ActorMaterializer = ActorMaterializer()
   implicit val executionContext: ExecutionContextExecutor = system.dispatcher
 
-  private val prometheusFriendlyName = name.replaceAll("-", "_")
   private val receivedMessagesCounter = Counter
-    .build(s"ubirch_${prometheusFriendlyName}_received_messages_count", s"Number of kafka messages received by $name")
+    .build(s"received_messages_count", s"Number of kafka messages received")
     .register()
   private val successCounter = Counter
-    .build(s"ubirch_${prometheusFriendlyName}_successes_count", s"Number of messages successfully processed by $name")
+    .build(s"successes_count", s"Number of messages successfully processed")
     .register()
   private val failureCounter = Counter
-    .build(s"ubirch_${prometheusFriendlyName}_failures_count", s"Number of messages unsuccessfully processed by $name")
+    .build(s"failures_count", s"Number of messages unsuccessfully processed")
+    .register()
+  private val processingTimer = Summary
+    .build(s"processing_time", s"Message processing time in seconds")
     .register()
 
   val appConfig: Config = ConfigFactory.load() // TODO: should this just be system.settings.config?
@@ -184,29 +186,31 @@ final class NioMicroserviceLive[Input, Output](
 
     kafkaSource.map { msg =>
       receivedMessagesCounter.inc()
-      Try {
-        logger.info(s"$name is processing message with id [${msg.record.key()}] and headers [${msg.record.headersScala}]...")
-        val msgHeaders = msg.record.headersScala
-        if (msgHeaders.keys.map(_.toLowerCase).exists(_ == "x-niomon-purge-caches")) purgeCaches()
+      processingTimer.time { () =>
+        Try {
+          logger.info(s"$name is processing message with id [${msg.record.key()}] and headers [${msg.record.headersScala}]...")
+          val msgHeaders = msg.record.headersScala
+          if (msgHeaders.keys.map(_.toLowerCase).exists(_ == "x-niomon-purge-caches")) purgeCaches()
 
-        val outputRecord = {
-          val msgDeserializationErrorsRethrown = msg.record.copy(value = msg.record.value().get)
-          val res = processRecord(msgDeserializationErrorsRethrown)
-          msgHeaders.get("x-niomon-force-reply-to") match {
-            case Some(destination) => res.copy(topic = destination)
-            case None => res
+          val outputRecord = {
+            val msgDeserializationErrorsRethrown = msg.record.copy(value = msg.record.value().get)
+            val res = processRecord(msgDeserializationErrorsRethrown)
+            msgHeaders.get("x-niomon-force-reply-to") match {
+              case Some(destination) => res.copy(topic = destination)
+              case None => res
+            }
           }
+          logger.info(s"$name successfully processed message with id [${outputRecord.key()}]")
+          successCounter.inc()
+
+          new ProducerMsg(outputRecord, msg.committableOffset)
+        }.toEither.left.map { e =>
+          logger.error(s"$name errored while processing message with id [${msg.record.key()}]")
+          failureCounter.inc()
+          val record = wrapThrowableInKafkaRecord(msg.record, e)
+
+          new ProducerErr(record, msg.committableOffset)
         }
-        logger.info(s"$name successfully processed message with id [${outputRecord.key()}]")
-        successCounter.inc()
-
-        new ProducerMsg(outputRecord, msg.committableOffset)
-      }.toEither.left.map { e =>
-        logger.error(s"$name errored while processing message with id [${msg.record.key()}]")
-        failureCounter.inc()
-        val record = wrapThrowableInKafkaRecord(msg.record, e)
-
-        new ProducerErr(record, msg.committableOffset)
       }
     }.toMat(sink)(Keep.both).mapMaterializedValue(DrainingControl.apply)
   }
