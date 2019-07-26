@@ -7,7 +7,7 @@ import akka.kafka.{ConsumerMessage, ProducerMessage}
 import akka.kafka.scaladsl.Consumer.DrainingControl
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.typesafe.config.Config
-import com.typesafe.scalalogging.StrictLogging
+import com.typesafe.scalalogging.{Logger, StrictLogging}
 import com.ubirch.niomon.base.NioMicroservice.{OM, WithHttpStatus}
 import com.ubirch.niomon.util.TupledFunction
 import com.ubirch.kafka._
@@ -18,7 +18,8 @@ import org.redisson.api.{RMapCache, RedissonClient}
 import scala.annotation.tailrec
 import scala.util.Try
 
-trait NioMicroservice[I, O] extends StrictLogging {
+trait NioMicroservice[I, O] {
+  protected def logger: Logger
   def name: String
   def config: Config
   def outputTopics: Map[String, String]
