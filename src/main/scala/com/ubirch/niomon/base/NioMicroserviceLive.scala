@@ -5,18 +5,18 @@ import java.time
 import akka.Done
 import akka.actor.ActorSystem
 import akka.kafka._
-import akka.kafka.scaladsl.Committer
 import akka.kafka.scaladsl.Consumer.DrainingControl
-import akka.kafka.scaladsl.{Consumer, Producer}
+import akka.kafka.scaladsl.{Committer, Consumer, Producer}
 import akka.stream.scaladsl.{GraphDSL, Keep, Partition, RunnableGraph, Sink, Source}
 import akka.stream.{ActorMaterializer, SinkShape}
 import com.typesafe.config.{Config, ConfigFactory, ConfigRenderOptions}
 import com.typesafe.scalalogging.StrictLogging
 import com.ubirch.kafka._
 import com.ubirch.niomon.util.{KafkaPayload, KafkaPayloadFactory}
-import io.prometheus.client.{Counter, Summary}
 import io.prometheus.client.exporter.HTTPServer
 import io.prometheus.client.hotspot.DefaultExports
+import io.prometheus.client.{Counter, Summary}
+import net.logstash.logback.argument.StructuredArguments.v
 import org.apache.kafka.clients.consumer.{ConsumerConfig, ConsumerRecord}
 import org.apache.kafka.clients.producer.ProducerRecord
 import org.apache.kafka.common.serialization._
@@ -59,7 +59,7 @@ final class NioMicroserviceLive[Input, Output](
   var caches: Vector[RMapCache[_, _]] = Vector()
 
   def purgeCaches(): Unit = {
-    logger.info("purging caches!")
+    logger.info("purging caches")
     caches.foreach(_.clear())
     logger.debug(s"cache sizes after purging: [${caches.map(c => c.getName + " => " + c.size()).mkString("; ")}]")
   }
@@ -188,7 +188,7 @@ final class NioMicroserviceLive[Input, Output](
       receivedMessagesCounter.inc()
       processingTimer.time { () =>
         Try {
-          logger.info(s"$name is processing message with id [${msg.record.key()}] and headers [${msg.record.headersScala}]...")
+          logger.info(s"$name is processing message with id [${v("requestId", msg.record.key())}] and headers [${v("headers", msg.record.headersScala.asJava)}]...")
           val msgHeaders = msg.record.headersScala
           if (msgHeaders.keys.map(_.toLowerCase).exists(_ == "x-niomon-purge-caches")) purgeCaches()
 
@@ -200,12 +200,12 @@ final class NioMicroserviceLive[Input, Output](
               case None => res
             }
           }
-          logger.info(s"$name successfully processed message with id [${outputRecord.key()}]")
+          logger.info(s"$name successfully processed message with id [${v("requestId", outputRecord.key())}]")
           successCounter.inc()
 
           new ProducerMsg(outputRecord, msg.committableOffset)
         }.toEither.left.map { e =>
-          logger.error(s"$name errored while processing message with id [${msg.record.key()}]")
+          logger.error(s"$name errored while processing message with id [${v("requestId", msg.record.key())}]")
           failureCounter.inc()
           val record = wrapThrowableInKafkaRecord(msg.record, e)
 
@@ -250,10 +250,10 @@ object NioMicroserviceLive {
     } transform { done =>
       done.flatten match {
         case Success(_) =>
-          that.logger.info("Exiting app successfully")
+          that.logger.info("microservice exited successfully")
           sys.exit(0)
         case Failure(e) =>
-          that.logger.error("Exiting app after error", e)
+          that.logger.error("microservice exited with error", e)
           sys.exit(1)
       }
     }
