@@ -5,18 +5,17 @@ import java.time
 import akka.Done
 import akka.actor.ActorSystem
 import akka.kafka._
-import akka.kafka.scaladsl.Committer
 import akka.kafka.scaladsl.Consumer.DrainingControl
-import akka.kafka.scaladsl.{Consumer, Producer}
+import akka.kafka.scaladsl.{Committer, Consumer, Producer}
 import akka.stream.scaladsl.{GraphDSL, Keep, Partition, RunnableGraph, Sink, Source}
 import akka.stream.{ActorMaterializer, SinkShape}
 import com.typesafe.config.{Config, ConfigFactory, ConfigRenderOptions}
-import com.typesafe.scalalogging.StrictLogging
+import com.typesafe.scalalogging.Logger
 import com.ubirch.kafka._
 import com.ubirch.niomon.util.{KafkaPayload, KafkaPayloadFactory}
-import io.prometheus.client.{Counter, Summary}
 import io.prometheus.client.exporter.HTTPServer
 import io.prometheus.client.hotspot.DefaultExports
+import io.prometheus.client.{Counter, Summary}
 import org.apache.kafka.clients.consumer.{ConsumerConfig, ConsumerRecord}
 import org.apache.kafka.clients.producer.ProducerRecord
 import org.apache.kafka.common.serialization._
@@ -24,6 +23,7 @@ import org.nustaq.serialization.FSTConfiguration
 import org.redisson.Redisson
 import org.redisson.api.{RMapCache, RedissonClient}
 import org.redisson.codec.FstCodec
+import org.slf4j.LoggerFactory
 
 import scala.collection.JavaConverters._
 import scala.concurrent.{ExecutionContext, ExecutionContextExecutor, Future}
@@ -35,7 +35,10 @@ final class NioMicroserviceLive[Input, Output](
 )(implicit
   inputPayloadFactory: KafkaPayloadFactory[Input],
   outputPayloadFactory: KafkaPayloadFactory[Output]
-) extends NioMicroservice[Input, Output] with StrictLogging {
+) extends NioMicroservice[Input, Output] {
+  protected val logger: Logger =
+    Logger(LoggerFactory.getLogger(getClass.getName + s"($name)"))
+
   implicit val system: ActorSystem = ActorSystem(name)
   implicit val materializer: ActorMaterializer = ActorMaterializer()
   implicit val executionContext: ExecutionContextExecutor = system.dispatcher
