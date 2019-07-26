@@ -1,14 +1,15 @@
 package com.ubirch.niomon.base
 
 import com.typesafe.scalalogging.StrictLogging
+import io.prometheus.client.CollectorRegistry
 import net.manub.embeddedkafka.EmbeddedKafka
 import org.apache.kafka.common.serialization.StringDeserializer
-import org.scalatest.{BeforeAndAfterAll, FlatSpec, Matchers}
+import org.scalatest.{BeforeAndAfterAll, BeforeAndAfterEach, FlatSpec, Matchers}
 
 import scala.concurrent.duration._
 import scala.concurrent.{Await, Awaitable}
 
-class NioMicroserviceTest extends FlatSpec with Matchers with EmbeddedKafka with StrictLogging with BeforeAndAfterAll {
+class NioMicroserviceTest extends FlatSpec with Matchers with EmbeddedKafka with StrictLogging with BeforeAndAfterAll with BeforeAndAfterEach {
   "NioMicroservice" should "work" in {
     withRunningKafka {
       var n = 0
@@ -86,6 +87,10 @@ class NioMicroserviceTest extends FlatSpec with Matchers with EmbeddedKafka with
   }
 
   def await[T](x: Awaitable[T]): T = Await.result(x, Duration.Inf)
+
+  override def beforeEach(): Unit = {
+    CollectorRegistry.defaultRegistry.clear()
+  }
 
   // comment this region out to get kafka per test
   // region OneKafka
