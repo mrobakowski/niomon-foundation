@@ -7,7 +7,7 @@ import akka.actor.ActorSystem
 import akka.kafka._
 import akka.kafka.scaladsl.Consumer.DrainingControl
 import akka.kafka.scaladsl.{Committer, Consumer, Producer}
-import akka.stream.scaladsl.{GraphDSL, Keep, Partition, RunnableGraph, Sink, Source}
+import akka.stream.scaladsl.{Flow, GraphDSL, Keep, Partition, RunnableGraph, Sink, Source}
 import akka.stream.{ActorMaterializer, SinkShape}
 import com.typesafe.config.{Config, ConfigFactory, ConfigRenderOptions}
 import com.typesafe.scalalogging.Logger
@@ -136,9 +136,11 @@ final class NioMicroserviceLive[Input, Output](
     Consumer.committableSource(consumerSettings, Subscriptions.topics(inputTopics: _*))
 
   val kafkaSuccessSink: Sink[ProducerMsg, Future[Done]] =
-    Producer.committableSink(producerSettingsForSuccess).contramap { msg: ProducerMsg =>
+    Flow[ProducerMsg].map { msg: ProducerMsg =>
       msg.copy(record = msg.record.withExtraHeaders("previous-microservice" -> name))
-    }
+    }.via(Producer.flexiFlow(producerSettingsForSuccess))
+    .map(_.passThrough)
+    .toMat(Committer.sink(CommitterSettings(system)))(Keep.right)
 
   val kafkaErrorSink: Sink[ProducerErr, Future[Done]] = errorTopic match {
     case Some(et) =>
