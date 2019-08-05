@@ -194,7 +194,7 @@ final class NioMicroserviceLive[Input, Output](
       receivedMessagesCounter.inc()
       processingTimer.time { () =>
         Try {
-          logger.info(s"$name is processing message with id [${v("requestId", msg.record.key())}] and headers [${v("headers", msg.record.headersScala.asJava)}]...")
+          logger.info(s"$name is processing message with id [${v("requestId", msg.record.key())}] and headers [${v("headers", msg.record.headersScala.asJava)}]")
           val msgHeaders = msg.record.headersScala
           if (msgHeaders.keys.map(_.toLowerCase).exists(_ == "x-niomon-purge-caches")) purgeCaches()
 
@@ -206,7 +206,6 @@ final class NioMicroserviceLive[Input, Output](
               case None => res
             }
           }
-          logger.info(s"$name successfully processed message with id [${v("requestId", outputRecord.key())}]")
           successCounter.inc()
 
           new ProducerMsg(outputRecord, msg.committableOffset)

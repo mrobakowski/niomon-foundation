@@ -3,14 +3,14 @@ package com.ubirch.niomon.base
 import java.util.concurrent.TimeUnit
 
 import akka.Done
-import akka.kafka.{ConsumerMessage, ProducerMessage}
 import akka.kafka.scaladsl.Consumer.DrainingControl
+import akka.kafka.{ConsumerMessage, ProducerMessage}
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.typesafe.config.Config
 import com.typesafe.scalalogging.{Logger, StrictLogging}
+import com.ubirch.kafka._
 import com.ubirch.niomon.base.NioMicroservice.{OM, WithHttpStatus}
 import com.ubirch.niomon.util.TupledFunction
-import com.ubirch.kafka._
 import org.apache.kafka.clients.consumer.ConsumerRecord
 import org.apache.kafka.clients.producer.ProducerRecord
 import org.redisson.api.{RMapCache, RedissonClient}
@@ -123,10 +123,10 @@ object NioMicroservice {
             val res = cache.get(key)
 
             if (res != null) {
-              logger.debug(s"Cache hit in [$name] for key [$key]")
+              logger.debug(s"cache hit in [$name] for key [$key]")
               res
             } else {
-              logger.debug(s"Cache miss in [$name] for key [$key]")
+              logger.debug(s"cache miss in [$name] for key [$key]")
               val freshRes = tupledF(x)
               if (shouldCache(freshRes.asInstanceOf[V])) {
                 cache.fastPut(key, freshRes, ttl.toNanos, TimeUnit.NANOSECONDS, maxIdleTime.toNanos, TimeUnit.NANOSECONDS)
@@ -134,7 +134,7 @@ object NioMicroservice {
               freshRes
             }
           }
-          logger.debug(s"Cache lookup in [$name] took $time ns (~${Math.round(time / 1000000.0)} ms)")
+          logger.debug(s"cache lookup in [$name] took $time ns (~${Math.round(time / 1000000.0)} ms)")
           res
         }
       }
