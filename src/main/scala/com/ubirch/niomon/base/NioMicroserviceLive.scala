@@ -140,8 +140,8 @@ final class NioMicroserviceLive[Input, Output](
     Flow[ProducerMsg].map { msg: ProducerMsg =>
       msg.copy(record = msg.record.withExtraHeaders("previous-microservice" -> name))
     }.via(Producer.flexiFlow(producerSettingsForSuccess))
-    .map(_.passThrough)
-    .toMat(Committer.sink(CommitterSettings(system)))(Keep.right)
+      .map(_.passThrough)
+      .toMat(Committer.sink(CommitterSettings(system)))(Keep.right)
 
   val kafkaErrorSink: Sink[ProducerErr, Future[Done]] = errorTopic match {
     case Some(et) =>
@@ -244,7 +244,7 @@ final class NioMicroserviceLive[Input, Output](
 
 object NioMicroserviceLive {
   def apply[I, O](name: String, logicFactory: NioMicroservice[I, O] => NioMicroserviceLogic[I, O])
-    (implicit ipf: KafkaPayloadFactory[I], opf: KafkaPayloadFactory[O]) = new NioMicroserviceLive[I, O](name, logicFactory)
+                 (implicit ipf: KafkaPayloadFactory[I], opf: KafkaPayloadFactory[O]) = new NioMicroserviceLive[I, O](name, logicFactory)
 
   private def runUntilDoneAndShutdownProcess(that: NioMicroserviceLive[_, _]): Future[Nothing] = {
     // different execution context, because we cannot rely on actor system's dispatcher after it has been terminated
