@@ -172,11 +172,8 @@ final class NioMicroserviceLive[Input, Output](
     val bothDone: (Future[Done], Future[Done]) => Future[Done] = (f1, f2) =>
       Future.sequence(List(f1, f2)).map(_ => Done)
 
-    val successSinkEither = kafkaSuccessSink.contramap { t: Either[ProducerErr, ProducerMsg] => t.right.get }
-    val errorSinkEither = kafkaErrorSink.contramap { t: Either[ProducerErr, ProducerMsg] => t.left.get }
-
     val sink: Sink[Either[ProducerErr, ProducerMsg], Future[Done]] =
-      Sink.fromGraph(GraphDSL.create(successSinkEither, errorSinkEither)(bothDone) { implicit builder =>
+      Sink.fromGraph(GraphDSL.create(kafkaSuccessSink, kafkaErrorSink)(bothDone) { implicit builder =>
         (success, error) =>
           import GraphDSL.Implicits._
           val fanOut = builder.add(new Partition[Either[ProducerErr, ProducerMsg]](2, {
@@ -184,8 +181,8 @@ final class NioMicroserviceLive[Input, Output](
             case Left(_) => 1
           }, eagerCancel = true))
 
-          fanOut.out(0) ~> success
-          fanOut.out(1) ~> error
+          fanOut.out(0).map(_.right.get) ~> success
+          fanOut.out(1).map(_.left.get) ~> error
 
           new SinkShape(fanOut.in)
       })
@@ -198,8 +195,10 @@ final class NioMicroserviceLive[Input, Output](
           val msgHeaders = msg.record.headersScala
           if (msgHeaders.keys.map(_.toLowerCase).exists(_ == "x-niomon-purge-caches")) purgeCaches()
 
-          val outputRecord = {
-            val msgDeserializationErrorsRethrown = msg.record.copy(value = msg.record.value().get)
+          val outputRecord: ProducerRecord[String, Output] = {
+            val msgDeserializationErrorsRethrown: ConsumerRecord[String, Input] =
+              msg.record.copy(value = msg.record.value().get)
+
             val res = processRecord(msgDeserializationErrorsRethrown)
             msgHeaders.get("x-niomon-force-reply-to") match {
               case Some(destination) => res.copy(topic = destination)
