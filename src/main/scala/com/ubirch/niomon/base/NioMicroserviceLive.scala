@@ -18,7 +18,8 @@ import io.prometheus.client.hotspot.DefaultExports
 import io.prometheus.client.{Counter, Summary}
 import net.logstash.logback.argument.StructuredArguments.v
 import org.apache.kafka.clients.consumer.{ConsumerConfig, ConsumerRecord}
-import org.apache.kafka.clients.producer.ProducerRecord
+import org.apache.kafka.clients.producer.{ProducerRecord, Producer => KProducer}
+import org.apache.kafka.common.{Metric, MetricName}
 import org.apache.kafka.common.serialization._
 import org.nustaq.serialization.FSTConfiguration
 import org.redisson.Redisson
@@ -127,10 +128,12 @@ final class NioMicroserviceLive[Input, Output](
   val producerSettingsForSuccess: ProducerSettings[String, Output] =
     ProducerSettings(producerConfig, new StringSerializer, outputPayload.serializer)
       .withBootstrapServers(kafkaUrl)
+  val kafkaProducerForSuccess: KProducer[String, Output] = producerSettingsForSuccess.createKafkaProducer()
 
   val producerSettingsForError: ProducerSettings[String, String] =
     ProducerSettings(producerConfig, new StringSerializer, new StringSerializer)
       .withBootstrapServers(kafkaUrl)
+  val kafkaProducerForError: KProducer[String, String] = producerSettingsForError.createKafkaProducer()
 
 
   val kafkaSource: Source[ConsumerMsg, Consumer.Control] =
@@ -139,13 +142,13 @@ final class NioMicroserviceLive[Input, Output](
   val kafkaSuccessSink: Sink[ProducerMsg, Future[Done]] =
     Flow[ProducerMsg].map { msg: ProducerMsg =>
       msg.copy(record = msg.record.withExtraHeaders("previous-microservice" -> name))
-    }.via(Producer.flexiFlow(producerSettingsForSuccess))
+    }.via(Producer.flexiFlow(producerSettingsForSuccess, kafkaProducerForSuccess))
       .map(_.passThrough)
       .toMat(Committer.sink(CommitterSettings(system)))(Keep.right)
 
   val kafkaErrorSink: Sink[ProducerErr, Future[Done]] = errorTopic match {
     case Some(et) =>
-      Producer.committableSink(producerSettingsForError)
+      Producer.committableSink(producerSettingsForError, kafkaProducerForError)
         .contramap { errMsg: ProducerErr =>
           logger.error(s"error sink has received an exception, sending on [$et]", errMsg.record.value())
           val errRecordWithStatus = producerErrorRecordToStringRecord(errMsg.record, et)
@@ -219,12 +222,23 @@ final class NioMicroserviceLive[Input, Output](
     }.toMat(sink)(Keep.both).mapMaterializedValue(DrainingControl.apply)
   }
 
+  var control: Option[DrainingControl[Done]] = None
+  def kafkaConsumerMetrics: Option[Future[Map[MetricName, Metric]]] = control.map(_.metrics)
+  def kafkaProducerForSuccessMetrics: Map[MetricName, Metric] = kafkaProducerForSuccess.metrics().asScala.toMap
+  def kafkaProducerForErrorMetrics: Map[MetricName, Metric] = kafkaProducerForError.metrics().asScala.toMap
+
   def run: DrainingControl[Done] = {
+    logger.info("starting prometheus server")
     DefaultExports.initialize()
     if (Try(appConfig.getBoolean("prometheus.enabled")).getOrElse(true)) {
       val _ = new HTTPServer(appConfig.getInt("prometheus.port"), true)
     }
-    graph.run()
+
+    logger.info("starting business logic")
+    val c = graph.run()
+    control = Some(c)
+
+    c
   }
 
   def runUntilDone: Future[Done] = {
@@ -250,6 +264,8 @@ object NioMicroserviceLive {
     import ExecutionContext.Implicits.global
 
     that.runUntilDone.transform(Success(_)) flatMap { done =>
+      that.kafkaProducerForSuccess.close()
+      that.kafkaProducerForError.close()
       that.system.terminate().map(_ => done)
     } transform { done =>
       done.flatten match {
