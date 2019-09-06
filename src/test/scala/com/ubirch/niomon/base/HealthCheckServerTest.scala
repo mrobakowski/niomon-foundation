@@ -8,10 +8,9 @@ import scala.concurrent.Future
 
 class HealthCheckServerTest extends FlatSpec with Matchers {
   "HealthCheckServer" should "work" ignore {
-    import scala.concurrent.ExecutionContext.Implicits.global
     val server = new HealthCheckServer(
-      livenessChecks = List(() => Future.successful(CheckResult("foo", success = true, JObject()))),
-      readinessChecks = List(() => Future.successful(CheckResult("bar", success = false, JObject()))),
+      livenessChecks = Map("foo" -> { () => Future.successful(CheckResult("foo", success = true, JObject())) }),
+      readinessChecks = Map("bar" -> { () => Future.successful(CheckResult("bar", success = false, JObject())) }),
       "http://localhost:8888/health"
     )
     server.run(8888)

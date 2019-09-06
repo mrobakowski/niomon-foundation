@@ -9,9 +9,11 @@ import akka.kafka.scaladsl.Consumer.DrainingControl
 import akka.kafka.scaladsl.{Committer, Consumer, Producer}
 import akka.stream.scaladsl.{Flow, GraphDSL, Keep, Partition, RunnableGraph, Sink, Source}
 import akka.stream.{ActorMaterializer, SinkShape}
+import com.fasterxml.jackson.databind.JsonNode
 import com.typesafe.config.{Config, ConfigFactory, ConfigRenderOptions}
 import com.typesafe.scalalogging.Logger
 import com.ubirch.kafka._
+import com.ubirch.niomon.healthcheck.{CheckResult, Checks, HealthCheckServer}
 import com.ubirch.niomon.util.{KafkaPayload, KafkaPayloadFactory}
 import io.prometheus.client.exporter.HTTPServer
 import io.prometheus.client.hotspot.DefaultExports
@@ -19,8 +21,10 @@ import io.prometheus.client.{Counter, Summary}
 import net.logstash.logback.argument.StructuredArguments.v
 import org.apache.kafka.clients.consumer.{ConsumerConfig, ConsumerRecord}
 import org.apache.kafka.clients.producer.{ProducerRecord, Producer => KProducer}
-import org.apache.kafka.common.{Metric, MetricName}
 import org.apache.kafka.common.serialization._
+import org.apache.kafka.common.{Metric, MetricName}
+import org.json4s.JsonAST.JValue
+import org.json4s.jackson.JsonMethods
 import org.nustaq.serialization.FSTConfiguration
 import org.redisson.Redisson
 import org.redisson.api.{RMapCache, RedissonClient}
@@ -33,7 +37,8 @@ import scala.util.{Failure, Success, Try}
 
 final class NioMicroserviceLive[Input, Output](
   val name: String,
-  logicFactory: NioMicroservice[Input, Output] => NioMicroserviceLogic[Input, Output]
+  logicFactory: NioMicroservice[Input, Output] => NioMicroserviceLogic[Input, Output],
+  healthCheckServer: HealthCheckServer
 )(implicit
   inputPayloadFactory: KafkaPayloadFactory[Input],
   outputPayloadFactory: KafkaPayloadFactory[Output]
@@ -135,7 +140,6 @@ final class NioMicroserviceLive[Input, Output](
       .withBootstrapServers(kafkaUrl)
   val kafkaProducerForError: KProducer[String, String] = producerSettingsForError.createKafkaProducer()
 
-
   val kafkaSource: Source[ConsumerMsg, Consumer.Control] =
     Consumer.committableSource(consumerSettings, Subscriptions.topics(inputTopics: _*))
 
@@ -219,13 +223,86 @@ final class NioMicroserviceLive[Input, Output](
           new ProducerErr(record, msg.committableOffset)
         }
       }
-    }.toMat(sink)(Keep.both).mapMaterializedValue(DrainingControl.apply)
+    }
+      .toMat(sink)(Keep.both)
+      .mapMaterializedValue(DrainingControl.apply)
   }
 
   var control: Option[DrainingControl[Done]] = None
-  def kafkaConsumerMetrics: Option[Future[Map[MetricName, Metric]]] = control.map(_.metrics)
-  def kafkaProducerForSuccessMetrics: Map[MetricName, Metric] = kafkaProducerForSuccess.metrics().asScala.toMap
-  def kafkaProducerForErrorMetrics: Map[MetricName, Metric] = kafkaProducerForError.metrics().asScala.toMap
+
+  def kafkaConsumerMetrics(): Option[Future[Map[MetricName, Metric]]] = control.map(_.metrics)
+
+  def kafkaProducerForSuccessMetrics(): Map[MetricName, Metric] = kafkaProducerForSuccess.metrics().asScala.toMap
+
+  def kafkaProducerForErrorMetrics(): Map[MetricName, Metric] = kafkaProducerForError.metrics().asScala.toMap
+
+  def updateHealthChecks(): Unit = {
+    // business logic
+    healthCheckServer.setLivenessCheck(Checks.ok("business-logic"))
+    healthCheckServer.setReadinessCheck(Checks.ok("business-logic"))
+
+    // kafka
+    healthCheckServer.setReadinessCheck("kafka") { () =>
+      kafkaConsumerMetrics().getOrElse(Future.successful(Map[MetricName, Metric]())).map { consumerMetrics =>
+        val producerForSuccessMetrics = kafkaProducerForSuccessMetrics()
+        val producerForErrorMetrics = kafkaProducerForErrorMetrics()
+
+        println((consumerMetrics, producerForErrorMetrics, producerForSuccessMetrics))
+
+        var success = true
+
+        implicit class RichMetric(m: Metric) {
+          // we're never interested in consumer node metrics, so let's get rid of them here
+          @inline def is(name: String): Boolean = m.metricName().group() != "consumer-node-metrics" && m.metricName().name() == name
+
+          @inline def toTuple: (String, AnyRef) = m.metricName().name() -> m.metricValue()
+        }
+
+
+        // TODO: ask for relevant metrics
+        def relevantMetrics(metrics: Map[MetricName, Metric]): Map[String, AnyRef] = {
+          metrics.values.collect {
+            case m if m is "last-heartbeat-seconds-ago" => m.toTuple
+            case m if m is "heartbeat-total" => m.toTuple
+            case m if m is "version" => m.toTuple
+            case m if m is "request-rate" => m.toTuple
+            case m if m is "response-rate" => m.toTuple
+            case m if m is "commit-rate" => m.toTuple
+            case m if m is "successful-authentication-total" => m.toTuple
+            case m if m is "failed-authentication-total" => m.toTuple
+            case m if m is "assigned-partitions" => m.toTuple
+            case m if m.is("records-consumed-rate") && m.metricName().tags().size() == 1 => m.toTuple
+            case m if m is "connection-count" => m.toTuple
+            case m if m is "connection-close-total" => m.toTuple
+            case m if m is "commit-latency-max" => m.toTuple
+          }(collection.breakOut)
+        }
+
+        val processedConsumerMetrics = relevantMetrics(consumerMetrics)
+        val processedSuccessMetrics = relevantMetrics(producerForSuccessMetrics)
+        val processedErrorMetrics = relevantMetrics(producerForErrorMetrics)
+
+        // TODO: is this a good indicator if the system is ready? I'm especially not sure about producer connection
+        //  counts, because the connections are created on demand there. Should we send some dummy messages on all the
+        //  producers right after their creation? Do they close unused connections after some time?
+        success = processedConsumerMetrics.getOrElse("connection-count", 0.0).asInstanceOf[Double] != 0.0 &&
+          processedSuccessMetrics.getOrElse("connection-count", 0.0).asInstanceOf[Double] != 0.0 // &&
+        // error producer connection count will be 0 when no errors have been sent yet
+          // processedErrorMetrics.getOrElse("connection-count", 0.0).asInstanceOf[Double] != 0.0
+
+        def json(metrics: Map[String, AnyRef]): JValue = JsonMethods.fromJsonNode(JsonMethods.mapper.valueToTree[JsonNode](metrics.asJava))
+
+        import org.json4s.JsonDSL._
+
+        val payload = ("consumer", json(processedConsumerMetrics)) ~
+          (("successProducer", json(processedSuccessMetrics))) ~
+          (("errorProducer", json(processedErrorMetrics))) ~
+          (("status", if (success) "ok" else "nok"))
+
+        CheckResult("kafka", success, payload)
+      }
+    }
+  }
 
   def run: DrainingControl[Done] = {
     logger.info("starting prometheus server")
@@ -237,6 +314,8 @@ final class NioMicroserviceLive[Input, Output](
     logger.info("starting business logic")
     val c = graph.run()
     control = Some(c)
+
+    updateHealthChecks()
 
     c
   }
@@ -256,8 +335,12 @@ final class NioMicroserviceLive[Input, Output](
 }
 
 object NioMicroserviceLive {
-  def apply[I, O](name: String, logicFactory: NioMicroservice[I, O] => NioMicroserviceLogic[I, O])
-                 (implicit ipf: KafkaPayloadFactory[I], opf: KafkaPayloadFactory[O]) = new NioMicroserviceLive[I, O](name, logicFactory)
+  def apply[I, O](
+    name: String,
+    logicFactory: NioMicroservice[I, O] => NioMicroserviceLogic[I, O],
+    healthCheckServer: HealthCheckServer
+  )(implicit ipf: KafkaPayloadFactory[I], opf: KafkaPayloadFactory[O]) =
+    new NioMicroserviceLive[I, O](name, logicFactory, healthCheckServer)
 
   private def runUntilDoneAndShutdownProcess(that: NioMicroserviceLive[_, _]): Future[Nothing] = {
     // different execution context, because we cannot rely on actor system's dispatcher after it has been terminated
