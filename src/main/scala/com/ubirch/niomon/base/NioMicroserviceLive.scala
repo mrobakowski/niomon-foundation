@@ -44,7 +44,7 @@ final class NioMicroserviceLive[Input, Output](
   override val config: Config = appConfig.getConfig(name)
 
   val healthCheckServer: HealthCheckServer = {
-    val s = new HealthCheckServer(Map(), Map(), config.getString("health-check.swagger-path"))
+    val s = new HealthCheckServer(Map(), Map())
 
     s.setLivenessCheck(Checks.process())
     s.setReadinessCheck(Checks.process())
@@ -247,7 +247,7 @@ final class NioMicroserviceLive[Input, Output](
     healthCheckServer.setReadinessCheck(
       Checks.kafka("kafka-consumer", control, connectionCountMustBeNonZero = true))
     healthCheckServer.setReadinessCheck(
-      Checks.kafka("kafka-success-producer", kafkaProducerForSuccess, connectionCountMustBeNonZero = true))
+      Checks.kafka("kafka-success-producer", kafkaProducerForSuccess, connectionCountMustBeNonZero = false))
     healthCheckServer.setReadinessCheck(
       Checks.kafka("kafka-error-producer", kafkaProducerForError, connectionCountMustBeNonZero = false))
   }
