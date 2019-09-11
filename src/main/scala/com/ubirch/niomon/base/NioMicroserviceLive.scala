@@ -9,11 +9,10 @@ import akka.kafka.scaladsl.Consumer.DrainingControl
 import akka.kafka.scaladsl.{Committer, Consumer, Producer}
 import akka.stream.scaladsl.{Flow, GraphDSL, Keep, Partition, RunnableGraph, Sink, Source}
 import akka.stream.{ActorMaterializer, SinkShape}
-import com.fasterxml.jackson.databind.JsonNode
 import com.typesafe.config.{Config, ConfigFactory, ConfigRenderOptions}
 import com.typesafe.scalalogging.Logger
 import com.ubirch.kafka._
-import com.ubirch.niomon.healthcheck.{CheckResult, Checks, HealthCheckServer}
+import com.ubirch.niomon.healthcheck.{Checks, HealthCheckServer}
 import com.ubirch.niomon.util.{KafkaPayload, KafkaPayloadFactory}
 import io.prometheus.client.exporter.HTTPServer
 import io.prometheus.client.hotspot.DefaultExports
@@ -22,9 +21,6 @@ import net.logstash.logback.argument.StructuredArguments.v
 import org.apache.kafka.clients.consumer.{ConsumerConfig, ConsumerRecord}
 import org.apache.kafka.clients.producer.{ProducerRecord, Producer => KProducer}
 import org.apache.kafka.common.serialization._
-import org.apache.kafka.common.{Metric, MetricName}
-import org.json4s.JsonAST.JValue
-import org.json4s.jackson.JsonMethods
 import org.nustaq.serialization.FSTConfiguration
 import org.redisson.Redisson
 import org.redisson.api.{RMapCache, RedissonClient}
@@ -38,13 +34,34 @@ import scala.util.{Failure, Success, Try}
 final class NioMicroserviceLive[Input, Output](
   val name: String,
   logicFactory: NioMicroservice[Input, Output] => NioMicroserviceLogic[Input, Output],
-  healthCheckServer: HealthCheckServer
 )(implicit
   inputPayloadFactory: KafkaPayloadFactory[Input],
   outputPayloadFactory: KafkaPayloadFactory[Output]
 ) extends NioMicroservice[Input, Output] {
   protected val logger: Logger =
     Logger(LoggerFactory.getLogger(getClass.getName + s"($name)"))
+  val appConfig: Config = ConfigFactory.load()
+  override val config: Config = appConfig.getConfig(name)
+
+  val healthCheckServer: HealthCheckServer = {
+    val s = new HealthCheckServer(Map(), Map(), config.getString("health-check.swagger-path"))
+
+    s.setLivenessCheck(Checks.process())
+    s.setReadinessCheck(Checks.process())
+
+    s.setLivenessCheck(Checks.notInitialized("business-logic"))
+    s.setReadinessCheck(Checks.notInitialized("business-logic"))
+
+    s.setReadinessCheck(Checks.notInitialized("kafka-consumer"))
+    s.setReadinessCheck(Checks.notInitialized("kafka-success-producer"))
+    s.setReadinessCheck(Checks.notInitialized("kafka-error-producer"))
+
+    if (config.getBoolean("health-check.enabled")) {
+      s.run(config.getInt("health-check.port"))
+    }
+
+    s
+  }
 
   implicit val system: ActorSystem = ActorSystem(name)
   implicit val materializer: ActorMaterializer = ActorMaterializer()
@@ -62,9 +79,6 @@ final class NioMicroserviceLive[Input, Output](
   private val processingTimer = Summary
     .build(s"processing_time", s"Message processing time in seconds")
     .register()
-
-  val appConfig: Config = ConfigFactory.load() // TODO: should this just be system.settings.config?
-  override val config: Config = appConfig.getConfig(name)
 
   var caches: Vector[RMapCache[_, _]] = Vector()
 
@@ -105,12 +119,6 @@ final class NioMicroserviceLive[Input, Output](
       case cce: ClassCastException => throw new RuntimeException("values in `kafka.topic.outgoing` must be string", cce)
     }
   }(scala.collection.breakOut)
-
-  override lazy val onlyOutputTopic: String = {
-    if (outputTopics.size != 1)
-      throw new IllegalStateException("you cannot use `onlyOutputTopic` with multiple output topics defined!")
-    outputTopics.values.head
-  }
 
   val errorTopic: Option[String] = Try(config.getString("kafka.topic.error")).toOption
   val failOnGraphException: Boolean = Try(config.getBoolean("failOnGraphException")).getOrElse(true)
@@ -230,78 +238,18 @@ final class NioMicroserviceLive[Input, Output](
 
   var control: Option[DrainingControl[Done]] = None
 
-  def kafkaConsumerMetrics(): Option[Future[Map[MetricName, Metric]]] = control.map(_.metrics)
-
-  def kafkaProducerForSuccessMetrics(): Map[MetricName, Metric] = kafkaProducerForSuccess.metrics().asScala.toMap
-
-  def kafkaProducerForErrorMetrics(): Map[MetricName, Metric] = kafkaProducerForError.metrics().asScala.toMap
-
   def updateHealthChecks(): Unit = {
     // business logic
     healthCheckServer.setLivenessCheck(Checks.ok("business-logic"))
     healthCheckServer.setReadinessCheck(Checks.ok("business-logic"))
 
     // kafka
-    healthCheckServer.setReadinessCheck("kafka") { () =>
-      kafkaConsumerMetrics().getOrElse(Future.successful(Map[MetricName, Metric]())).map { consumerMetrics =>
-        val producerForSuccessMetrics = kafkaProducerForSuccessMetrics()
-        val producerForErrorMetrics = kafkaProducerForErrorMetrics()
-
-        println((consumerMetrics, producerForErrorMetrics, producerForSuccessMetrics))
-
-        var success = true
-
-        implicit class RichMetric(m: Metric) {
-          // we're never interested in consumer node metrics, so let's get rid of them here
-          @inline def is(name: String): Boolean = m.metricName().group() != "consumer-node-metrics" && m.metricName().name() == name
-
-          @inline def toTuple: (String, AnyRef) = m.metricName().name() -> m.metricValue()
-        }
-
-
-        // TODO: ask for relevant metrics
-        def relevantMetrics(metrics: Map[MetricName, Metric]): Map[String, AnyRef] = {
-          metrics.values.collect {
-            case m if m is "last-heartbeat-seconds-ago" => m.toTuple
-            case m if m is "heartbeat-total" => m.toTuple
-            case m if m is "version" => m.toTuple
-            case m if m is "request-rate" => m.toTuple
-            case m if m is "response-rate" => m.toTuple
-            case m if m is "commit-rate" => m.toTuple
-            case m if m is "successful-authentication-total" => m.toTuple
-            case m if m is "failed-authentication-total" => m.toTuple
-            case m if m is "assigned-partitions" => m.toTuple
-            case m if m.is("records-consumed-rate") && m.metricName().tags().size() == 1 => m.toTuple
-            case m if m is "connection-count" => m.toTuple
-            case m if m is "connection-close-total" => m.toTuple
-            case m if m is "commit-latency-max" => m.toTuple
-          }(collection.breakOut)
-        }
-
-        val processedConsumerMetrics = relevantMetrics(consumerMetrics)
-        val processedSuccessMetrics = relevantMetrics(producerForSuccessMetrics)
-        val processedErrorMetrics = relevantMetrics(producerForErrorMetrics)
-
-        // TODO: is this a good indicator if the system is ready? I'm especially not sure about producer connection
-        //  counts, because the connections are created on demand there. Should we send some dummy messages on all the
-        //  producers right after their creation? Do they close unused connections after some time?
-        success = processedConsumerMetrics.getOrElse("connection-count", 0.0).asInstanceOf[Double] != 0.0 &&
-          processedSuccessMetrics.getOrElse("connection-count", 0.0).asInstanceOf[Double] != 0.0 // &&
-        // error producer connection count will be 0 when no errors have been sent yet
-          // processedErrorMetrics.getOrElse("connection-count", 0.0).asInstanceOf[Double] != 0.0
-
-        def json(metrics: Map[String, AnyRef]): JValue = JsonMethods.fromJsonNode(JsonMethods.mapper.valueToTree[JsonNode](metrics.asJava))
-
-        import org.json4s.JsonDSL._
-
-        val payload = ("consumer", json(processedConsumerMetrics)) ~
-          (("successProducer", json(processedSuccessMetrics))) ~
-          (("errorProducer", json(processedErrorMetrics))) ~
-          (("status", if (success) "ok" else "nok"))
-
-        CheckResult("kafka", success, payload)
-      }
-    }
+    healthCheckServer.setReadinessCheck(
+      Checks.kafka("kafka-consumer", control, connectionCountMustBeNonZero = true))
+    healthCheckServer.setReadinessCheck(
+      Checks.kafka("kafka-success-producer", kafkaProducerForSuccess, connectionCountMustBeNonZero = true))
+    healthCheckServer.setReadinessCheck(
+      Checks.kafka("kafka-error-producer", kafkaProducerForError, connectionCountMustBeNonZero = false))
   }
 
   def run: DrainingControl[Done] = {
@@ -335,18 +283,16 @@ final class NioMicroserviceLive[Input, Output](
 }
 
 object NioMicroserviceLive {
-  def apply[I, O](
-    name: String,
-    logicFactory: NioMicroservice[I, O] => NioMicroserviceLogic[I, O],
-    healthCheckServer: HealthCheckServer
-  )(implicit ipf: KafkaPayloadFactory[I], opf: KafkaPayloadFactory[O]) =
-    new NioMicroserviceLive[I, O](name, logicFactory, healthCheckServer)
+  def apply[I, O](name: String, logicFactory: NioMicroservice[I, O] => NioMicroserviceLogic[I, O])
+    (implicit ipf: KafkaPayloadFactory[I], opf: KafkaPayloadFactory[O]) =
+    new NioMicroserviceLive[I, O](name, logicFactory)
 
   private def runUntilDoneAndShutdownProcess(that: NioMicroserviceLive[_, _]): Future[Nothing] = {
     // different execution context, because we cannot rely on actor system's dispatcher after it has been terminated
     import ExecutionContext.Implicits.global
 
     that.runUntilDone.transform(Success(_)) flatMap { done =>
+      that.healthCheckServer.join()
       that.kafkaProducerForSuccess.close()
       that.kafkaProducerForError.close()
       that.system.terminate().map(_ => done)

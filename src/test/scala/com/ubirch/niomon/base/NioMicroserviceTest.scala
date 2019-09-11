@@ -1,7 +1,7 @@
 package com.ubirch.niomon.base
 
 import com.typesafe.scalalogging.StrictLogging
-import com.ubirch.niomon.healthcheck.{Checks, HealthCheckServer}
+import com.ubirch.niomon.healthcheck.HealthCheckSuccess
 import io.prometheus.client.CollectorRegistry
 import net.manub.embeddedkafka.EmbeddedKafka
 import org.apache.kafka.common.serialization.StringDeserializer
@@ -11,9 +11,6 @@ import scala.concurrent.duration._
 import scala.concurrent.{Await, Awaitable}
 
 class NioMicroserviceTest extends FlatSpec with Matchers with EmbeddedKafka with StrictLogging with BeforeAndAfterAll with BeforeAndAfterEach {
-  var healthCheckServer = new HealthCheckServer(Map(), Map(), "localhost")
-  healthCheckServer.setReadinessCheck(Checks.system())
-
   "NioMicroservice" should "work" in {
     withRunningKafka {
       var n = 0
@@ -22,7 +19,7 @@ class NioMicroserviceTest extends FlatSpec with Matchers with EmbeddedKafka with
           n += 1
           s"foobar$n" -> "default"
         }
-      }, healthCheckServer)
+      })
 
       val control = microservice.run
 
@@ -35,9 +32,8 @@ class NioMicroserviceTest extends FlatSpec with Matchers with EmbeddedKafka with
       records.size should equal(3)
       records should contain allOf("foobar1", "foobar2", "foobar3")
 
-      val readyStatus = await(healthCheckServer.ready())
-
-      println(readyStatus)
+      val readyStatus = await(microservice.healthCheckServer.ready())
+      readyStatus shouldBe a[HealthCheckSuccess]
 
       await(control.drainAndShutdown()(microservice.system.dispatcher))
     }
@@ -57,7 +53,7 @@ class NioMicroserviceTest extends FlatSpec with Matchers with EmbeddedKafka with
             "barbaz" -> "default"
           }
         }
-      }, healthCheckServer)
+      })
 
       val control = microservice.run
 
@@ -82,7 +78,7 @@ class NioMicroserviceTest extends FlatSpec with Matchers with EmbeddedKafka with
         override def process(input: String): (String, String) = {
           throw new RuntimeException("foobar")
         }
-      }, healthCheckServer)
+      })
       val after = microservice.runUntilDone
 
       publishStringMessageToKafka("foo", "quux")
