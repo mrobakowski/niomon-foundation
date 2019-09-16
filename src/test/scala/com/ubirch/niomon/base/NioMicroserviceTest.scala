@@ -1,6 +1,7 @@
 package com.ubirch.niomon.base
 
 import com.typesafe.scalalogging.StrictLogging
+import com.ubirch.niomon.healthcheck.HealthCheckSuccess
 import io.prometheus.client.CollectorRegistry
 import net.manub.embeddedkafka.EmbeddedKafka
 import org.apache.kafka.common.serialization.StringDeserializer
@@ -30,6 +31,9 @@ class NioMicroserviceTest extends FlatSpec with Matchers with EmbeddedKafka with
 
       records.size should equal(3)
       records should contain allOf("foobar1", "foobar2", "foobar3")
+
+      val readyStatus = await(microservice.healthCheckServer.ready())
+      readyStatus shouldBe a[HealthCheckSuccess]
 
       await(control.drainAndShutdown()(microservice.system.dispatcher))
     }

@@ -23,9 +23,13 @@ trait NioMicroservice[I, O] {
   def name: String
   def config: Config
   def outputTopics: Map[String, String]
-  def context: NioMicroservice.Context
-  def onlyOutputTopic: String
+  lazy val onlyOutputTopic: String = {
+    if (outputTopics.size != 1)
+      throw new IllegalStateException("you cannot use `onlyOutputTopic` with multiple output topics defined!")
+    outputTopics.values.head
+  }
   def errorTopic: Option[String]
+  def context: NioMicroservice.Context
 
   def run: DrainingControl[Done]
 

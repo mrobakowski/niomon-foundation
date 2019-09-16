@@ -12,13 +12,14 @@ import akka.stream.{ActorMaterializer, SinkShape}
 import com.typesafe.config.{Config, ConfigFactory, ConfigRenderOptions}
 import com.typesafe.scalalogging.Logger
 import com.ubirch.kafka._
+import com.ubirch.niomon.healthcheck.{Checks, HealthCheckServer}
 import com.ubirch.niomon.util.{KafkaPayload, KafkaPayloadFactory}
 import io.prometheus.client.exporter.HTTPServer
 import io.prometheus.client.hotspot.DefaultExports
 import io.prometheus.client.{Counter, Summary}
 import net.logstash.logback.argument.StructuredArguments.v
 import org.apache.kafka.clients.consumer.{ConsumerConfig, ConsumerRecord}
-import org.apache.kafka.clients.producer.ProducerRecord
+import org.apache.kafka.clients.producer.{ProducerRecord, Producer => KProducer}
 import org.apache.kafka.common.serialization._
 import org.nustaq.serialization.FSTConfiguration
 import org.redisson.Redisson
@@ -32,13 +33,35 @@ import scala.util.{Failure, Success, Try}
 
 final class NioMicroserviceLive[Input, Output](
   val name: String,
-  logicFactory: NioMicroservice[Input, Output] => NioMicroserviceLogic[Input, Output]
+  logicFactory: NioMicroservice[Input, Output] => NioMicroserviceLogic[Input, Output],
 )(implicit
   inputPayloadFactory: KafkaPayloadFactory[Input],
   outputPayloadFactory: KafkaPayloadFactory[Output]
 ) extends NioMicroservice[Input, Output] {
   protected val logger: Logger =
     Logger(LoggerFactory.getLogger(getClass.getName + s"($name)"))
+  val appConfig: Config = ConfigFactory.load()
+  override val config: Config = appConfig.getConfig(name)
+
+  val healthCheckServer: HealthCheckServer = {
+    val s = new HealthCheckServer(Map(), Map())
+
+    s.setLivenessCheck(Checks.process())
+    s.setReadinessCheck(Checks.process())
+
+    s.setLivenessCheck(Checks.notInitialized("business-logic"))
+    s.setReadinessCheck(Checks.notInitialized("business-logic"))
+
+    s.setReadinessCheck(Checks.notInitialized("kafka-consumer"))
+    s.setReadinessCheck(Checks.notInitialized("kafka-success-producer"))
+    s.setReadinessCheck(Checks.notInitialized("kafka-error-producer"))
+
+    if (config.getBoolean("health-check.enabled")) {
+      s.run(config.getInt("health-check.port"))
+    }
+
+    s
+  }
 
   implicit val system: ActorSystem = ActorSystem(name)
   implicit val materializer: ActorMaterializer = ActorMaterializer()
@@ -56,9 +79,6 @@ final class NioMicroserviceLive[Input, Output](
   private val processingTimer = Summary
     .build(s"processing_time", s"Message processing time in seconds")
     .register()
-
-  val appConfig: Config = ConfigFactory.load() // TODO: should this just be system.settings.config?
-  override val config: Config = appConfig.getConfig(name)
 
   var caches: Vector[RMapCache[_, _]] = Vector()
 
@@ -100,12 +120,6 @@ final class NioMicroserviceLive[Input, Output](
     }
   }(scala.collection.breakOut)
 
-  override lazy val onlyOutputTopic: String = {
-    if (outputTopics.size != 1)
-      throw new IllegalStateException("you cannot use `onlyOutputTopic` with multiple output topics defined!")
-    outputTopics.values.head
-  }
-
   val errorTopic: Option[String] = Try(config.getString("kafka.topic.error")).toOption
   val failOnGraphException: Boolean = Try(config.getBoolean("failOnGraphException")).getOrElse(true)
 
@@ -127,11 +141,12 @@ final class NioMicroserviceLive[Input, Output](
   val producerSettingsForSuccess: ProducerSettings[String, Output] =
     ProducerSettings(producerConfig, new StringSerializer, outputPayload.serializer)
       .withBootstrapServers(kafkaUrl)
+  val kafkaProducerForSuccess: KProducer[String, Output] = producerSettingsForSuccess.createKafkaProducer()
 
   val producerSettingsForError: ProducerSettings[String, String] =
     ProducerSettings(producerConfig, new StringSerializer, new StringSerializer)
       .withBootstrapServers(kafkaUrl)
-
+  val kafkaProducerForError: KProducer[String, String] = producerSettingsForError.createKafkaProducer()
 
   val kafkaSource: Source[ConsumerMsg, Consumer.Control] =
     Consumer.committableSource(consumerSettings, Subscriptions.topics(inputTopics: _*))
@@ -139,13 +154,13 @@ final class NioMicroserviceLive[Input, Output](
   val kafkaSuccessSink: Sink[ProducerMsg, Future[Done]] =
     Flow[ProducerMsg].map { msg: ProducerMsg =>
       msg.copy(record = msg.record.withExtraHeaders("previous-microservice" -> name))
-    }.via(Producer.flexiFlow(producerSettingsForSuccess))
+    }.via(Producer.flexiFlow(producerSettingsForSuccess, kafkaProducerForSuccess))
       .map(_.passThrough)
       .toMat(Committer.sink(CommitterSettings(system)))(Keep.right)
 
   val kafkaErrorSink: Sink[ProducerErr, Future[Done]] = errorTopic match {
     case Some(et) =>
-      Producer.committableSink(producerSettingsForError)
+      Producer.committableSink(producerSettingsForError, kafkaProducerForError)
         .contramap { errMsg: ProducerErr =>
           logger.error(s"error sink has received an exception, sending on [$et]", errMsg.record.value())
           val errRecordWithStatus = producerErrorRecordToStringRecord(errMsg.record, et)
@@ -172,11 +187,8 @@ final class NioMicroserviceLive[Input, Output](
     val bothDone: (Future[Done], Future[Done]) => Future[Done] = (f1, f2) =>
       Future.sequence(List(f1, f2)).map(_ => Done)
 
-    val successSinkEither = kafkaSuccessSink.contramap { t: Either[ProducerErr, ProducerMsg] => t.right.get }
-    val errorSinkEither = kafkaErrorSink.contramap { t: Either[ProducerErr, ProducerMsg] => t.left.get }
-
     val sink: Sink[Either[ProducerErr, ProducerMsg], Future[Done]] =
-      Sink.fromGraph(GraphDSL.create(successSinkEither, errorSinkEither)(bothDone) { implicit builder =>
+      Sink.fromGraph(GraphDSL.create(kafkaSuccessSink, kafkaErrorSink)(bothDone) { implicit builder =>
         (success, error) =>
           import GraphDSL.Implicits._
           val fanOut = builder.add(new Partition[Either[ProducerErr, ProducerMsg]](2, {
@@ -184,8 +196,8 @@ final class NioMicroserviceLive[Input, Output](
             case Left(_) => 1
           }, eagerCancel = true))
 
-          fanOut.out(0) ~> success
-          fanOut.out(1) ~> error
+          fanOut.out(0).map(_.right.get) ~> success
+          fanOut.out(1).map(_.left.get) ~> error
 
           new SinkShape(fanOut.in)
       })
@@ -198,8 +210,10 @@ final class NioMicroserviceLive[Input, Output](
           val msgHeaders = msg.record.headersScala
           if (msgHeaders.keys.map(_.toLowerCase).exists(_ == "x-niomon-purge-caches")) purgeCaches()
 
-          val outputRecord = {
-            val msgDeserializationErrorsRethrown = msg.record.copy(value = msg.record.value().get)
+          val outputRecord: ProducerRecord[String, Output] = {
+            val msgDeserializationErrorsRethrown: ConsumerRecord[String, Input] =
+              msg.record.copy(value = msg.record.value().get)
+
             val res = processRecord(msgDeserializationErrorsRethrown)
             msgHeaders.get("x-niomon-force-reply-to") match {
               case Some(destination) => res.copy(topic = destination)
@@ -217,15 +231,41 @@ final class NioMicroserviceLive[Input, Output](
           new ProducerErr(record, msg.committableOffset)
         }
       }
-    }.toMat(sink)(Keep.both).mapMaterializedValue(DrainingControl.apply)
+    }
+      .toMat(sink)(Keep.both)
+      .mapMaterializedValue(DrainingControl.apply)
+  }
+
+  var control: Option[DrainingControl[Done]] = None
+
+  def updateHealthChecks(): Unit = {
+    // business logic
+    healthCheckServer.setLivenessCheck(Checks.ok("business-logic"))
+    healthCheckServer.setReadinessCheck(Checks.ok("business-logic"))
+
+    // kafka
+    healthCheckServer.setReadinessCheck(
+      Checks.kafka("kafka-consumer", control, connectionCountMustBeNonZero = true))
+    healthCheckServer.setReadinessCheck(
+      Checks.kafka("kafka-success-producer", kafkaProducerForSuccess, connectionCountMustBeNonZero = false))
+    healthCheckServer.setReadinessCheck(
+      Checks.kafka("kafka-error-producer", kafkaProducerForError, connectionCountMustBeNonZero = false))
   }
 
   def run: DrainingControl[Done] = {
+    logger.info("starting prometheus server")
     DefaultExports.initialize()
     if (Try(appConfig.getBoolean("prometheus.enabled")).getOrElse(true)) {
       val _ = new HTTPServer(appConfig.getInt("prometheus.port"), true)
     }
-    graph.run()
+
+    logger.info("starting business logic")
+    val c = graph.run()
+    control = Some(c)
+
+    updateHealthChecks()
+
+    c
   }
 
   def runUntilDone: Future[Done] = {
@@ -244,13 +284,17 @@ final class NioMicroserviceLive[Input, Output](
 
 object NioMicroserviceLive {
   def apply[I, O](name: String, logicFactory: NioMicroservice[I, O] => NioMicroserviceLogic[I, O])
-                 (implicit ipf: KafkaPayloadFactory[I], opf: KafkaPayloadFactory[O]) = new NioMicroserviceLive[I, O](name, logicFactory)
+    (implicit ipf: KafkaPayloadFactory[I], opf: KafkaPayloadFactory[O]) =
+    new NioMicroserviceLive[I, O](name, logicFactory)
 
   private def runUntilDoneAndShutdownProcess(that: NioMicroserviceLive[_, _]): Future[Nothing] = {
     // different execution context, because we cannot rely on actor system's dispatcher after it has been terminated
     import ExecutionContext.Implicits.global
 
     that.runUntilDone.transform(Success(_)) flatMap { done =>
+      that.healthCheckServer.join()
+      that.kafkaProducerForSuccess.close()
+      that.kafkaProducerForError.close()
       that.system.terminate().map(_ => done)
     } transform { done =>
       done.flatten match {

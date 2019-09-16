@@ -81,6 +81,12 @@
             <version>${akka.stream.kafka.version}</version>
         </dependency>
 
+        <dependency>
+            <groupId>com.ubirch.niomon</groupId>
+            <artifactId>health-check</artifactId>
+            <version>1.0.0-SNAPSHOT</version>
+        </dependency>
+
         <!-- other -->
         <dependency>
             <groupId>org.redisson</groupId>
