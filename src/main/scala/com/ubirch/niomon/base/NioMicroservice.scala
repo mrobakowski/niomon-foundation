@@ -101,20 +101,29 @@ object NioMicroservice {
   class Context(getRedisson: => RedissonClient, val config: Config, registerCache: RMapCache[_, _] => Unit = { _ => }) extends StrictLogging {
     lazy val redisson: RedissonClient = getRedisson
 
+    //noinspection TypeAnnotation
     // This cache API is split in two steps (`cached(_).buildCache(_)`) to make type inference happy.
     // Originally it was just `cached(name)(function)`, but when `shouldCache` parameter was added after the `name`,
     // it screwed up type inference, because it was lexically before the `function`. And it is the `function` that has
     // the correct types for the type inference
-    //noinspection TypeAnnotation
-    def cached[F](f: F)(implicit F: TupledFunction[F]) = new CacheBuilder[F, F.Output](f)
+    def cached[F](f: F)(implicit F: TupledFunction[F]) = new CacheBuilder[F, F.TupledInput, F.Output](f) {
+      override implicit def inputIsI: tupledFunction.TupledInput =:= F.TupledInput = implicitly
+      override implicit def outputIsO: tupledFunction.Output =:= F.Output = implicitly
+    }
 
-    // V is here just to make type inference possible. V == tupledFunction.Output
-    class CacheBuilder[F, V] private[NioMicroservice](f: F)(implicit val tupledFunction: TupledFunction[F]) {
+    // I and O are here just to make type inference possible. I == tupledFunction.TupledInput and O == tupledFunction.Output
+    abstract class CacheBuilder[F, I, O] private[NioMicroservice](f: F)(implicit val tupledFunction: TupledFunction[F]) {
       private val tupledF = tupledFunction.tupled(f)
+      implicit def inputIsI: tupledFunction.TupledInput =:= I
+      implicit def outputIsO: tupledFunction.Output =:= O
 
       // for some reason, this doesn't really work with arbitrary key types, so we always use strings for keys
-      def buildCache(name: String, shouldCache: V => Boolean = { _ => true })
-        (implicit cacheKey: CacheKey[tupledFunction.TupledInput]): F = {
+      def buildCache(
+        name: String,
+        shouldCache: O => Boolean = { _ => true }
+      )(implicit
+        cacheKey: CacheKey[I]
+      ): F = {
         val cache = redisson.getMapCache[String, tupledFunction.Output](name)
         registerCache(cache)
 
@@ -132,7 +141,7 @@ object NioMicroservice {
             } else {
               logger.debug(s"cache miss in [$name] for key [$key]")
               val freshRes = tupledF(x)
-              if (shouldCache(freshRes.asInstanceOf[V])) {
+              if (shouldCache(freshRes)) {
                 cache.fastPut(key, freshRes, ttl.toNanos, TimeUnit.NANOSECONDS, maxIdleTime.toNanos, TimeUnit.NANOSECONDS)
               }
               freshRes
@@ -146,16 +155,12 @@ object NioMicroservice {
 
   }
 
-  trait CacheKey[-T] {
+  trait CacheKey[T] {
     def key(x: T): String
   }
 
   object CacheKey {
-
-    implicit object ToStringKey extends CacheKey[Any] {
-      override def key(x: Any): String = x.toString
-    }
-
+    implicit def toStringKey[T]: CacheKey[T] = (x: T) => x.toString
   }
 
   case class WithHttpStatus(status: Int, cause: Throwable) extends Exception(cause)
