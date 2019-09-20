@@ -20,15 +20,21 @@ import scala.util.Try
 
 trait NioMicroservice[I, O] {
   protected def logger: Logger
+
   def name: String
+
   def config: Config
+
   def outputTopics: Map[String, String]
+
   lazy val onlyOutputTopic: String = {
     if (outputTopics.size != 1)
       throw new IllegalStateException("you cannot use `onlyOutputTopic` with multiple output topics defined!")
     outputTopics.values.head
   }
+
   def errorTopic: Option[String]
+
   def context: NioMicroservice.Context
 
   def run: DrainingControl[Done]
@@ -107,14 +113,21 @@ object NioMicroservice {
     // it screwed up type inference, because it was lexically before the `function`. And it is the `function` that has
     // the correct types for the type inference
     def cached[F](f: F)(implicit F: TupledFunction[F]) = new CacheBuilder[F, F.TupledInput, F.Output](f) {
-      override implicit def inputIsI: tupledFunction.TupledInput =:= F.TupledInput = implicitly
-      override implicit def outputIsO: tupledFunction.Output =:= F.Output = implicitly
+      override implicit def inputIsI =
+        // kinda hackish, but if I do `implicitly`, I get an infinite loop
+        =:=.tpEquals[Any].asInstanceOf[tupledFunction.TupledInput =:= F.TupledInput]
+
+      override implicit def outputIsO =
+        // kinda hackish, but if I do `implicitly`, I get an infinite loop
+        =:=.tpEquals[Any].asInstanceOf[tupledFunction.Output =:= F.Output]
     }
 
     // I and O are here just to make type inference possible. I == tupledFunction.TupledInput and O == tupledFunction.Output
     abstract class CacheBuilder[F, I, O] private[NioMicroservice](f: F)(implicit val tupledFunction: TupledFunction[F]) {
       private val tupledF = tupledFunction.tupled(f)
+
       implicit def inputIsI: tupledFunction.TupledInput =:= I
+
       implicit def outputIsO: tupledFunction.Output =:= O
 
       // for some reason, this doesn't really work with arbitrary key types, so we always use strings for keys
