@@ -224,7 +224,7 @@ final class NioMicroserviceLive[Input, Output](
 
           new ProducerMsg(outputRecord, msg.committableOffset)
         }.toEither.left.map { e =>
-          logger.error(s"$name errored while processing message with id [${v("requestId", msg.record.key())}]")
+          logger.error(s"$name errored while processing message with id [${v("requestId", msg.record.key())}]", e)
           failureCounter.inc()
           val record = wrapThrowableInKafkaRecord(msg.record, e)
 
