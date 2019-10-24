@@ -30,8 +30,12 @@
     </appender>
 
     <logger name="com.ubirch" level="DEBUG"/>
+    <logger name="org.apache.zookeeper" level="ERROR"/>
+    <logger name="org.apache.kafka" level="ERROR"/>
+    <logger name="kafka" level="ERROR"/>
+    <logger name="akka.kafka.internal.KafkaConsumerActor" level="DEBUG"/>
 
     <root level="INFO">
-        <appender-ref ref="STDERR"/>
+        <appender-ref ref="STDOUT"/>
     </root>
 </configuration>

@@ -5,15 +5,15 @@ import java.time
 import akka.Done
 import akka.actor.ActorSystem
 import akka.kafka._
-import akka.kafka.scaladsl.Consumer.DrainingControl
-import akka.kafka.scaladsl.{Committer, Consumer, Producer}
+import akka.kafka.scaladsl.Consumer.{Control, DrainingControl}
+import akka.kafka.scaladsl.{Consumer, Producer}
 import akka.stream.scaladsl.{Flow, GraphDSL, Keep, Partition, RunnableGraph, Sink, Source}
 import akka.stream.{ActorMaterializer, SinkShape}
 import com.typesafe.config.{Config, ConfigFactory, ConfigRenderOptions}
 import com.typesafe.scalalogging.Logger
 import com.ubirch.kafka._
 import com.ubirch.niomon.healthcheck.{Checks, HealthCheckServer}
-import com.ubirch.niomon.util.{KafkaPayload, KafkaPayloadFactory}
+import com.ubirch.niomon.util.{KafkaPayload, KafkaPayloadFactory, RetriableCommitter}
 import io.prometheus.client.exporter.HTTPServer
 import io.prometheus.client.hotspot.DefaultExports
 import io.prometheus.client.{Counter, Summary}
@@ -88,22 +88,20 @@ final class NioMicroserviceLive[Input, Output](
     logger.debug(s"cache sizes after purging: [${caches.map(c => c.getName + " => " + c.size()).mkString("; ")}]")
   }
 
-  lazy val redisson: RedissonClient = Redisson.create(
-    {
-      val conf = Try(appConfig.getConfig("redisson"))
-        .map(_.root().render(ConfigRenderOptions.concise()))
-        .map(org.redisson.config.Config.fromJSON)
-        .getOrElse(new org.redisson.config.Config())
+  lazy val redisson: RedissonClient = Redisson.create({
+    val conf = Try(appConfig.getConfig("redisson"))
+      .map(_.root().render(ConfigRenderOptions.concise()))
+      .map(org.redisson.config.Config.fromJSON)
+      .getOrElse(new org.redisson.config.Config())
 
-      // force the FST serializer to use serialize everything, because we sometimes want to store POJOs which
-      // aren't `Serializable`
-      if (conf.getCodec == null || conf.getCodec.isInstanceOf[FstCodec]) {
-        conf.setCodec(new FstCodec(FSTConfiguration.createDefaultConfiguration().setForceSerializable(true)))
-      }
-
-      conf
+    // force the FST serializer to use serialize everything, because we sometimes want to store POJOs which
+    // aren't `Serializable`
+    if (conf.getCodec == null || conf.getCodec.isInstanceOf[FstCodec]) {
+      conf.setCodec(new FstCodec(FSTConfiguration.createDefaultConfiguration().setForceSerializable(true)))
     }
-  )
+
+    conf
+  })
 
   override val context = new NioMicroservice.Context(redisson, config, { c =>
     logger.debug("registering new cache")
@@ -156,7 +154,7 @@ final class NioMicroserviceLive[Input, Output](
       msg.copy(record = msg.record.withExtraHeaders("previous-microservice" -> name))
     }.via(Producer.flexiFlow(producerSettingsForSuccess, kafkaProducerForSuccess))
       .map(_.passThrough)
-      .toMat(Committer.sink(CommitterSettings(system)))(Keep.right)
+      .toMat(RetriableCommitter.sink(CommitterSettings(system), 10, 1.5, 200))(Keep.right)
 
   val kafkaErrorSink: Sink[ProducerErr, Future[Done]] = errorTopic match {
     case Some(et) =>
@@ -167,7 +165,7 @@ final class NioMicroserviceLive[Input, Output](
           errMsg.copy(record = errRecordWithStatus)
         }
     case None =>
-      Committer.sink(CommitterSettings(system)).contramap { errMsg: ProducerErr =>
+      RetriableCommitter.sink(CommitterSettings(system), 10, 1.5, 200).contramap { errMsg: ProducerErr =>
         val exception = errMsg.record.value()
         logger.error("error sink has received an exception", exception)
         if (failOnGraphException) {
@@ -236,16 +234,14 @@ final class NioMicroserviceLive[Input, Output](
       .mapMaterializedValue(DrainingControl.apply)
   }
 
-  var control: Option[DrainingControl[Done]] = None
-
-  def updateHealthChecks(): Unit = {
+  def updateHealthChecks(kafkaControl: Control): Unit = {
     // business logic
     healthCheckServer.setLivenessCheck(Checks.ok("business-logic"))
     healthCheckServer.setReadinessCheck(Checks.ok("business-logic"))
 
     // kafka
     healthCheckServer.setReadinessCheck(
-      Checks.kafka("kafka-consumer", control, connectionCountMustBeNonZero = true))
+      Checks.kafka("kafka-consumer", kafkaControl, connectionCountMustBeNonZero = true))
     healthCheckServer.setReadinessCheck(
       Checks.kafka("kafka-success-producer", kafkaProducerForSuccess, connectionCountMustBeNonZero = false))
     healthCheckServer.setReadinessCheck(
@@ -261,9 +257,7 @@ final class NioMicroserviceLive[Input, Output](
 
     logger.info("starting business logic")
     val c = graph.run()
-    control = Some(c)
-
-    updateHealthChecks()
+    updateHealthChecks(c)
 
     c
   }
