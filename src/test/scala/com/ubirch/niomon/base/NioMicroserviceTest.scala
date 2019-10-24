@@ -5,6 +5,7 @@ import com.ubirch.niomon.healthcheck.HealthCheckSuccess
 import io.prometheus.client.CollectorRegistry
 import net.manub.embeddedkafka.EmbeddedKafka
 import org.apache.kafka.common.serialization.StringDeserializer
+import org.scalatest.tagobjects.Slow
 import org.scalatest.{BeforeAndAfterAll, BeforeAndAfterEach, FlatSpec, Matchers}
 
 import scala.concurrent.duration._
@@ -90,7 +91,7 @@ class NioMicroserviceTest extends FlatSpec with Matchers with EmbeddedKafka with
     }
   }
 
-  it should "continue processing after kafka goes down for a while" in {
+  it should "continue processing after kafka goes down for a while" taggedAs(Slow) in {
     withRunningKafka {
       val microservice = NioMicroserviceLive[String, String]("faulty-kafka", new NioMicroserviceLogic.Simple(_) {
         override def process(input: String): (String, String) = s"success-$input" -> "default"
@@ -126,7 +127,7 @@ class NioMicroserviceTest extends FlatSpec with Matchers with EmbeddedKafka with
     }
   }
 
-  it should "handle long running NioMicroserviceLogics" in {
+  it should "handle long running NioMicroserviceLogics" taggedAs(Slow) in {
     val microservice = NioMicroserviceLive[String, String]("test-long", new NioMicroserviceLogic.Simple(_) {
       override def process(input: String): (String, String) = {
         Thread.sleep(20000)
