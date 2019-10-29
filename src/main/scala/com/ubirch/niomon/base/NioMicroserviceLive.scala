@@ -240,6 +240,10 @@ final class NioMicroserviceLive[Input, Output](
     healthCheckServer.setReadinessCheck(Checks.ok("business-logic"))
 
     // kafka
+    val kafkaReachable = Checks.kafkaNodesReachable(kafkaProducerForSuccess)
+    healthCheckServer.setLivenessCheck(kafkaReachable)
+    healthCheckServer.setReadinessCheck(kafkaReachable)
+
     healthCheckServer.setReadinessCheck(
       Checks.kafka("kafka-consumer", kafkaControl, connectionCountMustBeNonZero = true))
     healthCheckServer.setReadinessCheck(
