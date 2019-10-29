@@ -5,6 +5,7 @@ import com.ubirch.niomon.healthcheck.HealthCheckSuccess
 import io.prometheus.client.CollectorRegistry
 import net.manub.embeddedkafka.EmbeddedKafka
 import org.apache.kafka.common.serialization.StringDeserializer
+import org.scalatest.tagobjects.Slow
 import org.scalatest.{BeforeAndAfterAll, BeforeAndAfterEach, FlatSpec, Matchers}
 
 import scala.concurrent.duration._
@@ -23,11 +24,11 @@ class NioMicroserviceTest extends FlatSpec with Matchers with EmbeddedKafka with
 
       val control = microservice.run
 
-      publishStringMessageToKafka("foo", "eins")
-      publishStringMessageToKafka("foo", "zwei")
-      publishStringMessageToKafka("foo", "drei")
+      publishStringMessageToKafka("test-input", "eins")
+      publishStringMessageToKafka("test-input", "zwei")
+      publishStringMessageToKafka("test-input", "drei")
 
-      val records = consumeNumberStringMessagesFrom("bar", 3)
+      val records = consumeNumberStringMessagesFrom("test-output", 3)
 
       records.size should equal(3)
       records should contain allOf("foobar1", "foobar2", "foobar3")
@@ -57,15 +58,15 @@ class NioMicroserviceTest extends FlatSpec with Matchers with EmbeddedKafka with
 
       val control = microservice.run
 
-      publishStringMessageToKafka("foo", "quux")
-      publishStringMessageToKafka("foo", "kex")
+      publishStringMessageToKafka("test-with-error-input", "quux")
+      publishStringMessageToKafka("test-with-error-input", "kex")
 
       implicit val d: StringDeserializer = new StringDeserializer
-      val records = consumeNumberMessagesFromTopics[String](Set("bar", "error"), 2)
+      val records = consumeNumberMessagesFromTopics[String](Set("test-with-error-output", "error"), 2)
 
       records.size should equal(2)
-      records.keys should contain only ("bar", "error")
-      records("bar") should contain only "barbaz"
+      records.keys should contain only("test-with-error-output", "error")
+      records("test-with-error-output") should contain only "barbaz"
       records("error") should contain only """{"error":"RuntimeException: foobar","causes":[],"microservice":"test-with-error","requestId":null}"""
 
       await(control.drainAndShutdown()(microservice.system.dispatcher))
@@ -81,7 +82,7 @@ class NioMicroserviceTest extends FlatSpec with Matchers with EmbeddedKafka with
       })
       val after = microservice.runUntilDone
 
-      publishStringMessageToKafka("foo", "quux")
+      publishStringMessageToKafka("test-input", "quux")
 
       val res = await(after.failed)
 
@@ -90,22 +91,82 @@ class NioMicroserviceTest extends FlatSpec with Matchers with EmbeddedKafka with
     }
   }
 
+  it should "continue processing after kafka goes down for a while" taggedAs(Slow) ignore {
+    withRunningKafka {
+      val microservice = NioMicroserviceLive[String, String]("faulty-kafka", new NioMicroserviceLogic.Simple(_) {
+        override def process(input: String): (String, String) = s"success-$input" -> "default"
+      })
+      val control = microservice.run
+
+      publishStringMessageToKafka("faulty-kafka-input", "one")
+      publishStringMessageToKafka("faulty-kafka-input", "two")
+      publishStringMessageToKafka("faulty-kafka-input", "three")
+
+      val records = consumeNumberStringMessagesFrom("faulty-kafka-output", 3)
+
+      records.size should equal(3)
+      records should contain allOf("success-one", "success-two", "success-three")
+
+      // emulate kafka going down...
+      logger.debug("Shutting down kafka...")
+      EmbeddedKafka.stop()
+      Thread.sleep(5000)
+      val _ = EmbeddedKafka.start()
+      logger.debug("Kafka should be back up again")
+
+      publishStringMessageToKafka("faulty-kafka-input", "four")
+      publishStringMessageToKafka("faulty-kafka-input", "five")
+      publishStringMessageToKafka("faulty-kafka-input", "six")
+
+      val recordsAfterFault = consumeNumberStringMessagesFrom("faulty-kafka-output", 3)
+
+      recordsAfterFault.size should equal(3)
+      recordsAfterFault should contain allOf("success-four", "success-five", "success-six")
+
+      await(control.drainAndShutdown()(microservice.system.dispatcher))
+    }
+  }
+
+  it should "handle long running NioMicroserviceLogics" taggedAs(Slow) ignore {
+    val microservice = NioMicroserviceLive[String, String]("test-long", new NioMicroserviceLogic.Simple(_) {
+      override def process(input: String): (String, String) = {
+        Thread.sleep(20000)
+        s"success-$input" -> "default"
+      }
+    })
+    val control = microservice.run
+
+    publishStringMessageToKafka("test-long-input", "one")
+    publishStringMessageToKafka("test-long-input", "two")
+    publishStringMessageToKafka("test-long-input", "three")
+
+    implicit val d: StringDeserializer = new StringDeserializer()
+    val records = consumeNumberMessagesFromTopics[String](Set("test-long-output"), 3, timeout = 1.minute)
+      .values.flatten.toList
+
+    records.size should equal(3)
+    records should contain allOf("success-one", "success-two", "success-three")
+
+    await(control.drainAndShutdown()(microservice.system.dispatcher))
+  }
+
   def await[T](x: Awaitable[T]): T = Await.result(x, Duration.Inf)
 
   override def beforeEach(): Unit = {
-    CollectorRegistry.defaultRegistry.clear()
+    CollectorRegistry.defaultRegistry.clear() // workaround for global prometheus state
   }
 
   // comment this region out to get kafka per test
   // region OneKafka
-//  override def beforeAll(): Unit = {
-//    EmbeddedKafka.start()
-//  }
-//
-//  override def afterAll(): Unit = {
-//    EmbeddedKafka.stop()
-//  }
-//
-//  def withRunningKafka(body: => Any): Any = body
+  override def beforeAll(): Unit = {
+    val _ = EmbeddedKafka.start()
+  }
+
+  override def afterAll(): Unit = {
+    EmbeddedKafka.stop()
+  }
+
+  def withRunningKafka(body: => Any): Any = body
+
   // endregion
 }
