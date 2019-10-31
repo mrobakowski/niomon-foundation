@@ -73,6 +73,10 @@
         </repository>
     </distributionManagement>
 
+    <properties>
+        <build.number>devbuild</build.number>
+    </properties>
+
     <dependencies>
         <!-- akka -->
         <dependency>
