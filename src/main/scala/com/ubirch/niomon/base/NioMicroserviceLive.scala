@@ -204,7 +204,8 @@ final class NioMicroserviceLive[Input, Output](
       receivedMessagesCounter.inc()
       processingTimer.time { () =>
         Try {
-          logger.info(s"$name is processing message with id [${v("requestId", msg.record.key())}] and headers [${v("headers", msg.record.headersScala.asJava)}]")
+          logger.info(s"$name is processing message with id [{}] and headers [{}]",
+            v("requestId", msg.record.key()), v("headers", msg.record.headersScala.asJava))
           val msgHeaders = msg.record.headersScala
           if (msgHeaders.keys.map(_.toLowerCase).exists(_ == "x-niomon-purge-caches")) purgeCaches()
 
@@ -222,7 +223,7 @@ final class NioMicroserviceLive[Input, Output](
 
           new ProducerMsg(outputRecord, msg.committableOffset)
         }.toEither.left.map { e =>
-          logger.error(s"$name errored while processing message with id [${v("requestId", msg.record.key())}]", e)
+          logger.error(s"$name errored while processing message with id [{}]", v("requestId", msg.record.key()), e)
           failureCounter.inc()
           val record = wrapThrowableInKafkaRecord(msg.record, e)
 
