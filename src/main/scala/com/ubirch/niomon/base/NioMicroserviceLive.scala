@@ -9,9 +9,10 @@ import akka.kafka.scaladsl.Consumer.{Control, DrainingControl}
 import akka.kafka.scaladsl.{Consumer, Producer}
 import akka.stream.scaladsl.{Flow, GraphDSL, Keep, Partition, RunnableGraph, Sink, Source}
 import akka.stream.{ActorMaterializer, SinkShape}
-import com.typesafe.config.{Config, ConfigFactory, ConfigRenderOptions}
+import com.typesafe.config.{Config, ConfigFactory}
 import com.typesafe.scalalogging.Logger
 import com.ubirch.kafka._
+import com.ubirch.niomon.cache.RedisCache
 import com.ubirch.niomon.healthcheck.{Checks, HealthCheckServer}
 import com.ubirch.niomon.util.{KafkaPayload, KafkaPayloadFactory, RetriableCommitter}
 import io.prometheus.client.exporter.HTTPServer
@@ -21,10 +22,6 @@ import net.logstash.logback.argument.StructuredArguments.v
 import org.apache.kafka.clients.consumer.{ConsumerConfig, ConsumerRecord}
 import org.apache.kafka.clients.producer.{ProducerRecord, Producer => KProducer}
 import org.apache.kafka.common.serialization._
-import org.nustaq.serialization.FSTConfiguration
-import org.redisson.Redisson
-import org.redisson.api.{RMapCache, RedissonClient}
-import org.redisson.codec.FstCodec
 import org.slf4j.LoggerFactory
 
 import scala.collection.JavaConverters._
@@ -80,34 +77,9 @@ final class NioMicroserviceLive[Input, Output](
     .build(s"processing_time", s"Message processing time in seconds")
     .register()
 
-  var caches: Vector[RMapCache[_, _]] = Vector()
+  lazy val redisCache: RedisCache = new RedisCache(appConfig)
 
-  def purgeCaches(): Unit = {
-    logger.info("purging caches")
-    caches.foreach(_.clear())
-    logger.debug(s"cache sizes after purging: [${caches.map(c => c.getName + " => " + c.size()).mkString("; ")}]")
-  }
-
-  lazy val redisson: RedissonClient = Redisson.create({
-    val conf = Try(appConfig.getConfig("redisson"))
-      .map(_.root().render(ConfigRenderOptions.concise()))
-      .map(org.redisson.config.Config.fromJSON)
-      .getOrElse(new org.redisson.config.Config())
-
-    // force the FST serializer to use serialize everything, because we sometimes want to store POJOs which
-    // aren't `Serializable`
-    if (conf.getCodec == null || conf.getCodec.isInstanceOf[FstCodec]) {
-      conf.setCodec(new FstCodec(FSTConfiguration.createDefaultConfiguration().setForceSerializable(true)))
-    }
-
-    conf
-  })
-
-  override val context = new NioMicroservice.Context(redisson, config, { c =>
-    logger.debug("registering new cache")
-    caches :+= c
-    logger.debug(s"caches in total: ${caches.size}")
-  })
+  override val context = new NioMicroservice.Context(redisCache, config)
 
   val inputTopics: Seq[String] = config.getStringList("kafka.topic.incoming").asScala
   override val outputTopics: Map[String, String] = config.getConfig("kafka.topic.outgoing").entrySet().asScala.map { e =>
@@ -207,7 +179,7 @@ final class NioMicroserviceLive[Input, Output](
           logger.info(s"$name is processing message with id [{}] and headers [{}]",
             v("requestId", msg.record.key()), v("headers", msg.record.headersScala.asJava))
           val msgHeaders = msg.record.headersScala
-          if (msgHeaders.keys.map(_.toLowerCase).exists(_ == "x-niomon-purge-caches")) purgeCaches()
+          if (msgHeaders.keys.map(_.toLowerCase).exists(_ == "x-niomon-purge-caches")) redisCache.purgeCaches()
 
           val outputRecord: ProducerRecord[String, Output] = {
             val msgDeserializationErrorsRethrown: ConsumerRecord[String, Input] =
