@@ -77,7 +77,7 @@ final class NioMicroserviceLive[Input, Output](
     .build(s"processing_time", s"Message processing time in seconds")
     .register()
 
-  lazy val redisCache: RedisCache = new RedisCache(appConfig)
+  lazy val redisCache: RedisCache = new RedisCache(name, appConfig)
 
   override val context = new NioMicroservice.Context(redisCache, config)
 
