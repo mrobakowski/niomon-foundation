@@ -8,7 +8,7 @@ import com.typesafe.config.Config
 import com.typesafe.scalalogging.{Logger, StrictLogging}
 import com.ubirch.kafka._
 import com.ubirch.niomon.base.NioMicroservice.{OM, WithHttpStatus}
-import com.ubirch.niomon.cache.{RedisCache, TupledFunction}
+import com.ubirch.niomon.cache.{DoesNotReturnFuture, RedisCache, ReturnsFuture, TupledFunction}
 import org.apache.kafka.clients.consumer.ConsumerRecord
 import org.apache.kafka.clients.producer.ProducerRecord
 
@@ -105,8 +105,12 @@ object NioMicroservice {
     lazy val redisCache: RedisCache = getRedisCache
 
     //noinspection TypeAnnotation
-    def cached[F](f: F)(implicit F: TupledFunction[F]) =
+    def cached[F](f: F)(implicit F: TupledFunction[F], ev: DoesNotReturnFuture[F]) =
       redisCache.cached(f)
+
+    //noinspection TypeAnnotation
+    def cachedF[F](f: F)(implicit F: TupledFunction[F], ev: ReturnsFuture[F]) =
+      redisCache.cachedF(f)
   }
 
   case class WithHttpStatus(status: Int, cause: Throwable) extends Exception(cause)
