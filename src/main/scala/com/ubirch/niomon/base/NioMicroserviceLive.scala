@@ -74,7 +74,7 @@ final class NioMicroserviceLive[Input, Output](
     .build(s"processing_size_messages", s"Number of kafka messages received")
     .register()
   private val processingLatency = Summary
-    .build(s"processing_time", s"Message processing time in seconds")
+    .build(s"processing_time_seconds", s"Message processing time in seconds")
     .quantile(0.9, 0.05) // Add 50th percentile (= median) with 5% tolerated error
     .quantile(0.95, 0.05) // Add 70th percentile (= median) with 5% tolerated error
     .quantile(0.99, 0.05) // Add 90th percentile with 1% tolerated error
