@@ -64,17 +64,21 @@ final class NioMicroserviceLive[Input, Output](
   implicit val materializer: ActorMaterializer = ActorMaterializer()
   implicit val executionContext: ExecutionContextExecutor = system.dispatcher
 
-  private val receivedMessagesCounter = Counter
-    .build(s"received_messages_count", s"Number of kafka messages received")
-    .register()
   private val successCounter = Counter
     .build(s"successes_count", s"Number of messages successfully processed")
     .register()
   private val failureCounter = Counter
     .build(s"failures_count", s"Number of messages unsuccessfully processed")
     .register()
-  private val processingTimer = Summary
+  private val processingSize = Summary
+    .build(s"processing_size_messages", s"Number of kafka messages received")
+    .register()
+  private val processingLatency = Summary
     .build(s"processing_time", s"Message processing time in seconds")
+    .quantile(0.9, 0.05) // Add 50th percentile (= median) with 5% tolerated error
+    .quantile(0.95, 0.05) // Add 70th percentile (= median) with 5% tolerated error
+    .quantile(0.99, 0.05) // Add 90th percentile with 1% tolerated error
+    .quantile(0.999, 0.05) // Add 90th percentile with 1% tolerated error
     .register()
 
   lazy val redisCache: RedisCache = new RedisCache(name, appConfig)
@@ -173,8 +177,8 @@ final class NioMicroserviceLive[Input, Output](
       })
 
     kafkaSource.map { msg =>
-      receivedMessagesCounter.inc()
-      processingTimer.time { () =>
+      processingSize.observe(1)
+      processingLatency.time { () =>
         Try {
           logger.info(s"$name is processing message with id [{}] and headers [{}]",
             v("requestId", msg.record.key()), v("headers", msg.record.headersScala.asJava))
