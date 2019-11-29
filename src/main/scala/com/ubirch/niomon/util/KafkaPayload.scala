@@ -7,6 +7,7 @@ import org.apache.kafka.common.serialization._
 
 import scala.util.Try
 
+/** Typeclass for data that can be both serialized and deserialized to and from a kafka topic */
 trait KafkaPayload[T] {
   def deserializer: Deserializer[T]
 
@@ -34,6 +35,8 @@ object KafkaPayload {
     override def serializer: Serializer[MessageEnvelope] = EnvelopeSerializer
   }
 
+  // For this one we don't have a default implicit instance, since one can come up with various valid behaviors
+  // for the deserializer.
   abstract class EitherKafkaPayload[L: KafkaPayload, R: KafkaPayload] extends KafkaPayload[Either[L, R]] {
     private val leftSerializer = KafkaPayload[L].serializer
     private val rightSerializer = KafkaPayload[R].serializer
@@ -58,6 +61,10 @@ object KafkaPayload {
     }
   }
 
+  /**
+   * EitherKafkaPayload with a deserializer that first tries to deserialize into a `L` variant, and if that fails, it
+   * tries `R`
+   */
   def tryBothEitherKafkaPayload[L: KafkaPayload, R: KafkaPayload]: KafkaPayload[Either[L, R]] = new EitherKafkaPayload[L, R] {
     override def deserializer: Deserializer[Either[L, R]] = new Deserializer[Either[L, R]] {
       private val leftDeserializer = KafkaPayload[L].deserializer
@@ -80,6 +87,11 @@ object KafkaPayload {
     }
   }
 
+  /**
+   * EitherKafkaPayload which deserializes into either Left or Right based on the topic argument.
+   * @param decide function which takes a topic name and returns `Left(())` or `Right(())` to decide how to deserialize
+   *               the payload from a given topic
+   */
   def topicBasedEitherKafkaPayload[L: KafkaPayload, R: KafkaPayload](decide: String => Either[Unit, Unit]): KafkaPayload[Either[L, R]] = new EitherKafkaPayload[L, R] {
     override def deserializer: Deserializer[Either[L, R]] = new Deserializer[Either[L, R]] {
       private val leftDeserializer = KafkaPayload[L].deserializer
