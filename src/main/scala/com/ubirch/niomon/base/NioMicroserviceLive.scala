@@ -28,18 +28,25 @@ import scala.collection.JavaConverters._
 import scala.concurrent.{ExecutionContext, ExecutionContextExecutor, Future}
 import scala.util.{Failure, Success, Try}
 
+// NOTE: if something doesn't have docs, look in the parent class/trait/whatever
+
 final class NioMicroserviceLive[Input, Output](
   val name: String,
   logicFactory: NioMicroservice[Input, Output] => NioMicroserviceLogic[Input, Output],
 )(implicit
+  // we take factories here, because the actual instance of KafkaPayload may depend on the configuration
   inputPayloadFactory: KafkaPayloadFactory[Input],
   outputPayloadFactory: KafkaPayloadFactory[Output]
 ) extends NioMicroservice[Input, Output] {
   protected val logger: Logger =
     Logger(LoggerFactory.getLogger(getClass.getName + s"($name)"))
+
+  /** The WHOLE application.conf (or other loaded config) */
   val appConfig: Config = ConfigFactory.load()
   override val config: Config = appConfig.getConfig(name)
 
+  // partially initialize the healthchecks, the next step is in [[updateHealthChecks]]. @see also health-check project
+  // library
   val healthCheckServer: HealthCheckServer = {
     val s = new HealthCheckServer(Map(), Map())
 
@@ -64,6 +71,7 @@ final class NioMicroserviceLive[Input, Output](
   implicit val materializer: ActorMaterializer = ActorMaterializer()
   implicit val executionContext: ExecutionContextExecutor = system.dispatcher
 
+  // prometheus metrics
   private val successCounter = Counter
     .build(s"successes_count", s"Number of messages successfully processed")
     .register()
@@ -81,10 +89,12 @@ final class NioMicroserviceLive[Input, Output](
     .quantile(0.999, 0.05) // Add 90th percentile with 1% tolerated error
     .register()
 
+  // distributed caching support
   lazy val redisCache: RedisCache = new RedisCache(name, appConfig)
 
   override val context = new NioMicroservice.Context(redisCache, config)
 
+  /** Kafka topics from which messages will be read for processing by this microservice. */
   val inputTopics: Seq[String] = config.getStringList("kafka.topic.incoming").asScala
   override val outputTopics: Map[String, String] = config.getConfig("kafka.topic.outgoing").entrySet().asScala.map { e =>
     try {
@@ -95,6 +105,7 @@ final class NioMicroserviceLive[Input, Output](
   }(scala.collection.breakOut)
 
   val errorTopic: Option[String] = Try(config.getString("kafka.topic.error")).toOption
+  /** Whether or not the whole app should fail on processing exception. Takes effect only if [[errorTopic]] is None. */
   val failOnGraphException: Boolean = Try(config.getBoolean("failOnGraphException")).getOrElse(true)
 
   val kafkaUrl: String = config.getString("kafka.url")
@@ -104,6 +115,7 @@ final class NioMicroserviceLive[Input, Output](
   implicit val inputPayload: KafkaPayload[Try[Input]] = KafkaPayload.tryDeserializePayload(inputPayloadFactory(context))
   implicit val outputPayload: KafkaPayload[Output] = outputPayloadFactory(context)
 
+  /** kafka consumer settings */
   val consumerSettings: ConsumerSettings[String, Try[Input]] =
     ConsumerSettings(consumerConfig, new StringDeserializer, inputPayload.deserializer)
       .withBootstrapServers(kafkaUrl)
@@ -112,19 +124,28 @@ final class NioMicroserviceLive[Input, Output](
       // timeout for closing the producer stage - by default it'll wait for commits for 30 seconds
       .withStopTimeout(Try(config.getDuration("kafka.stopTimeout")).getOrElse(time.Duration.ofSeconds(30)))
 
+  /** kafka producer settings for success-ish topics */
   val producerSettingsForSuccess: ProducerSettings[String, Output] =
     ProducerSettings(producerConfig, new StringSerializer, outputPayload.serializer)
       .withBootstrapServers(kafkaUrl)
+  // we create our own producer instead of letting akka-streams do it, because we need this instance to get the metrics
   val kafkaProducerForSuccess: KProducer[String, Output] = producerSettingsForSuccess.createKafkaProducer()
 
+  /** kafka producer settings for the error topic */
   val producerSettingsForError: ProducerSettings[String, String] =
     ProducerSettings(producerConfig, new StringSerializer, new StringSerializer)
       .withBootstrapServers(kafkaUrl)
+  // we create our own producer instead of letting akka-streams do it, because we need this instance to get the metrics
   val kafkaProducerForError: KProducer[String, String] = producerSettingsForError.createKafkaProducer()
 
+  /** akka-streams source for the incoming kafka messages */
   val kafkaSource: Source[ConsumerMsg, Consumer.Control] =
     Consumer.committableSource(consumerSettings, Subscriptions.topics(inputTopics: _*))
 
+  /**
+   * Sink that sends successfully processed messages to the configured kafka topics. It batches messages for committing
+   * and retries if the commit fails.
+   */
   val kafkaSuccessSink: Sink[ProducerMsg, Future[Done]] =
     Flow[ProducerMsg].map { msg: ProducerMsg =>
       msg.copy(record = msg.record.withExtraHeaders("previous-microservice" -> name))
@@ -132,6 +153,12 @@ final class NioMicroserviceLive[Input, Output](
       .map(_.passThrough)
       .toMat(RetriableCommitter.sink(CommitterSettings(system), 10, 1.5, 200))(Keep.right)
 
+  /**
+   * Sink that sends error messages to the configured kafka topics. It uses a batching, retrying committer iff the
+   * output error topic is not set.
+   *
+   * TODO: that behavior may need to change, so it also does that if the error topic is set.
+   */
   val kafkaErrorSink: Sink[ProducerErr, Future[Done]] = errorTopic match {
     case Some(et) =>
       Producer.committableSink(producerSettingsForError, kafkaProducerForError)
@@ -155,12 +182,16 @@ final class NioMicroserviceLive[Input, Output](
 
   lazy val logic: NioMicroserviceLogic[Input, Output] = logicFactory(this)
 
+  /** @see [[NioMicroserviceLogic.processRecord]] */
   def processRecord(input: ConsumerRecord[String, Input]): ProducerRecord[String, Output] = logic.processRecord(input)
 
+  /** The akka-streaming graph for running the microservice. */
   def graph: RunnableGraph[DrainingControl[Done]] = {
     val bothDone: (Future[Done], Future[Done]) => Future[Done] = (f1, f2) =>
       Future.sequence(List(f1, f2)).map(_ => Done)
 
+    // sink which sends to either the success producer sink or the error producer sink, depending on if the received
+    // value is Left (error) or Right (success).
     val sink: Sink[Either[ProducerErr, ProducerMsg], Future[Done]] =
       Sink.fromGraph(GraphDSL.create(kafkaSuccessSink, kafkaErrorSink)(bothDone) { implicit builder =>
         (success, error) =>
@@ -176,20 +207,27 @@ final class NioMicroserviceLive[Input, Output](
           new SinkShape(fanOut.in)
       })
 
+    // the graph
     kafkaSource.map { msg =>
       processingSize.observe(1)
       processingLatency.time { () =>
         Try {
           logger.info(s"$name is processing message with id [{}] and headers [{}]",
             v("requestId", msg.record.key()), v("headers", msg.record.headersScala.asJava))
+
+          // An escape hatch to purge the caches. Every message can potentially do this.
+          // TODO: we may potentially want to add a config switch to disable this?
           val msgHeaders = msg.record.headersScala
           if (msgHeaders.keys.map(_.toLowerCase).exists(_ == "x-niomon-purge-caches")) redisCache.purgeCaches()
 
           val outputRecord: ProducerRecord[String, Output] = {
-            val msgDeserializationErrorsRethrown: ConsumerRecord[String, Input] =
+            val deserializedMessage: ConsumerRecord[String, Input] =
+              // by doing a get here, we effectively rethrow any deserialization errors
               msg.record.copy(value = msg.record.value().get)
 
-            val res = processRecord(msgDeserializationErrorsRethrown)
+            val res = processRecord(deserializedMessage)
+            // messages can be forced to follow a different path than normally. It was used by the event-log, but I
+            // don't think it's used anymore. TODO: investigate and maybe remove?
             msgHeaders.get("x-niomon-force-reply-to") match {
               case Some(destination) => res.copy(topic = destination)
               case None => res
@@ -211,6 +249,7 @@ final class NioMicroserviceLive[Input, Output](
       .mapMaterializedValue(DrainingControl.apply)
   }
 
+  /** Update the healthchecks when all the parts of the system are initialized */
   def updateHealthChecks(kafkaControl: Control): Unit = {
     // business logic
     healthCheckServer.setLivenessCheck(Checks.ok("business-logic"))
@@ -229,6 +268,7 @@ final class NioMicroserviceLive[Input, Output](
       Checks.kafka("kafka-error-producer", kafkaProducerForError, connectionCountMustBeNonZero = false))
   }
 
+  /** Run the [[graph]] */
   def run: DrainingControl[Done] = {
     logger.info("starting prometheus server")
     DefaultExports.initialize()
@@ -243,6 +283,7 @@ final class NioMicroserviceLive[Input, Output](
     c
   }
 
+  /** Kind of like [[run]], but returns a future which completes when the graph is done. */
   def runUntilDone: Future[Done] = {
     val control = run
     // flatMapped to `drainAndShutdown`, because bare `isShutdown` doesn't propagate errors
@@ -251,6 +292,7 @@ final class NioMicroserviceLive[Input, Output](
     }
   }
 
+  /** Like [[runUntilDone]], but after that it shuts the process down */
   def runUntilDoneAndShutdownProcess: Future[Nothing] = {
     // real impl is in the companion object, so we can conveniently change the execution context
     NioMicroserviceLive.runUntilDoneAndShutdownProcess(this)
