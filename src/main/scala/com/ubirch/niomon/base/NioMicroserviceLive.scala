@@ -218,11 +218,14 @@ final class NioMicroserviceLive[Input, Output](
           // An escape hatch to purge the caches. Every message can potentially do this.
           // TODO: we may potentially want to add a config switch to disable this?
           val msgHeaders = msg.record.headersScala
-          if (msgHeaders.keys.map(_.toLowerCase).exists(_ == "x-niomon-purge-caches")) redisCache.purgeCaches()
+          if (msgHeaders.keys.map(_.toLowerCase).exists(_ == "x-niomon-purge-caches") &&
+            appConfig.hasPath("redisson")) {
+            redisCache.purgeCaches()
+          }
 
           val outputRecord: ProducerRecord[String, Output] = {
             val deserializedMessage: ConsumerRecord[String, Input] =
-              // by doing a get here, we effectively rethrow any deserialization errors
+            // by doing a get here, we effectively rethrow any deserialization errors
               msg.record.copy(value = msg.record.value().get)
 
             val res = processRecord(deserializedMessage)
