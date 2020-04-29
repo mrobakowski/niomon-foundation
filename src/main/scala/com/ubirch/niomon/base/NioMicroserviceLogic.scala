@@ -2,9 +2,9 @@ package com.ubirch.niomon.base
 
 import com.typesafe.config.Config
 import com.typesafe.scalalogging.StrictLogging
+import com.ubirch.kafka._
 import org.apache.kafka.clients.consumer.ConsumerRecord
 import org.apache.kafka.clients.producer.ProducerRecord
-import com.ubirch.kafka._
 
 /** This is what every Niomon microservice has to implement and plug into a [[NioMicroservice]] runtime */
 abstract class NioMicroserviceLogic[I, O](runtime: NioMicroservice[I, O]) extends StrictLogging {

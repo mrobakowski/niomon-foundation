@@ -14,6 +14,7 @@ import com.typesafe.scalalogging.Logger
 import com.ubirch.kafka._
 import com.ubirch.niomon.cache.RedisCache
 import com.ubirch.niomon.healthcheck.{Checks, HealthCheckServer}
+import com.ubirch.niomon.util.EnrichedMap.toEnrichedMap
 import com.ubirch.niomon.util.{KafkaPayload, KafkaPayloadFactory, RetriableCommitter}
 import io.prometheus.client.exporter.HTTPServer
 import io.prometheus.client.hotspot.DefaultExports
@@ -218,7 +219,7 @@ final class NioMicroserviceLive[Input, Output](
           // An escape hatch to purge the caches. Every message can potentially do this.
           // TODO: we may potentially want to add a config switch to disable this?
           val msgHeaders = msg.record.headersScala
-          if (msgHeaders.keys.map(_.toLowerCase).exists(_ == "x-niomon-purge-caches") &&
+          if (msgHeaders.CaseInsensitive.contains("x-niomon-purge-caches") &&
             appConfig.hasPath("redisson")) {
             redisCache.purgeCaches()
           }
@@ -231,7 +232,7 @@ final class NioMicroserviceLive[Input, Output](
             val res = processRecord(deserializedMessage)
             // messages can be forced to follow a different path than normally. It was used by the event-log, but I
             // don't think it's used anymore. TODO: investigate and maybe remove?
-            msgHeaders.get("x-niomon-force-reply-to") match {
+            msgHeaders.CaseInsensitive.get("x-niomon-force-reply-to") match {
               case Some(destination) => res.copy(topic = destination)
               case None => res
             }
