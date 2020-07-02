@@ -52,11 +52,11 @@ final class NioMicroserviceLive[Input, Output](
     val s = new HealthCheckServer(Map(), Map())
 
     s.setLivenessCheck(Checks.process())
-    s.setReadinessCheck(Checks.process())
-
     s.setLivenessCheck(Checks.notInitialized("business-logic"))
-    s.setReadinessCheck(Checks.notInitialized("business-logic"))
+    s.setLivenessCheck(Checks.notInitialized("kafka-consumer"))
 
+    s.setReadinessCheck(Checks.process())
+    s.setReadinessCheck(Checks.notInitialized("business-logic"))
     s.setReadinessCheck(Checks.notInitialized("kafka-consumer"))
     s.setReadinessCheck(Checks.notInitialized("kafka-success-producer"))
     s.setReadinessCheck(Checks.notInitialized("kafka-error-producer"))
@@ -255,21 +255,18 @@ final class NioMicroserviceLive[Input, Output](
 
   /** Update the healthchecks when all the parts of the system are initialized */
   def updateHealthChecks(kafkaControl: Control): Unit = {
-    // business logic
-    healthCheckServer.setLivenessCheck(Checks.ok("business-logic"))
-    healthCheckServer.setReadinessCheck(Checks.ok("business-logic"))
 
-    // kafka
     val kafkaReachable = Checks.kafkaNodesReachable(kafkaProducerForSuccess)
-    healthCheckServer.setLivenessCheck(kafkaReachable)
-    healthCheckServer.setReadinessCheck(kafkaReachable)
 
-    healthCheckServer.setReadinessCheck(
-      Checks.kafka("kafka-consumer", kafkaControl, connectionCountMustBeNonZero = true))
-    healthCheckServer.setReadinessCheck(
-      Checks.kafka("kafka-success-producer", kafkaProducerForSuccess, connectionCountMustBeNonZero = false))
-    healthCheckServer.setReadinessCheck(
-      Checks.kafka("kafka-error-producer", kafkaProducerForError, connectionCountMustBeNonZero = false))
+    healthCheckServer.setLivenessCheck(Checks.ok("business-logic"))
+    healthCheckServer.setLivenessCheck(kafkaReachable)
+    healthCheckServer.setLivenessCheck(Checks.kafka("kafka-consumer", kafkaControl, connectionCountMustBeNonZero = true))
+
+    healthCheckServer.setReadinessCheck(Checks.ok("business-logic"))
+    healthCheckServer.setReadinessCheck(kafkaReachable)
+    healthCheckServer.setReadinessCheck(Checks.kafka("kafka-consumer", kafkaControl, connectionCountMustBeNonZero = true))
+    healthCheckServer.setReadinessCheck(Checks.kafka("kafka-success-producer", kafkaProducerForSuccess, connectionCountMustBeNonZero = false))
+    healthCheckServer.setReadinessCheck(Checks.kafka("kafka-error-producer", kafkaProducerForError, connectionCountMustBeNonZero = false))
   }
 
   /** Run the [[graph]] */
