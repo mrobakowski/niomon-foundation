@@ -21,7 +21,7 @@ import io.prometheus.client.hotspot.DefaultExports
 import io.prometheus.client.{Counter, Summary}
 import net.logstash.logback.argument.StructuredArguments.v
 import org.apache.kafka.clients.consumer.{ConsumerConfig, ConsumerRecord}
-import org.apache.kafka.clients.producer.{ProducerRecord, Producer => KProducer}
+import org.apache.kafka.clients.producer.{ProducerConfig, ProducerRecord, Producer => KProducer}
 import org.apache.kafka.common.serialization._
 import org.slf4j.LoggerFactory
 
@@ -129,6 +129,7 @@ final class NioMicroserviceLive[Input, Output](
   val producerSettingsForSuccess: ProducerSettings[String, Output] =
     ProducerSettings(producerConfig, new StringSerializer, outputPayload.serializer)
       .withBootstrapServers(kafkaUrl)
+      .withProperty(ProducerConfig.LINGER_MS_CONFIG, "100")
   // we create our own producer instead of letting akka-streams do it, because we need this instance to get the metrics
   val kafkaProducerForSuccess: KProducer[String, Output] = producerSettingsForSuccess.createKafkaProducer()
 
