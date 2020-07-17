@@ -118,7 +118,9 @@ trait NioMicroservice[I, O] {
 
     logger.error(s"error sink has received an exception, sending on [$errorTopic]", exception)
 
-    val stringifiedException = stringifyException(exception, record.key())
+    val requestId = record.requestIdHeader().orNull
+
+    val stringifiedException = stringifyException(exception, requestId)
 
     val errRecord: ProducerRecord[String, String] = record.copy(topic = errorTopic, value = stringifiedException)
     val errRecordWithStatus = status match {

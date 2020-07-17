@@ -211,11 +211,11 @@ final class NioMicroserviceLive[Input, Output](
 
     // the graph
     kafkaSource.map { msg =>
+      val requestId = msg.record.requestIdHeader().orNull
       processingSize.observe(1)
       processingLatency.time { () =>
         Try {
-          logger.info(s"$name is processing message with id [{}] and headers [{}]",
-            v("requestId", msg.record.key()), v("headers", msg.record.headersScala.asJava))
+          logger.info(s"$name is processing message with id [{}] and headers [{}]", v("requestId", requestId), v("headers", msg.record.headersScala.asJava))
 
           // An escape hatch to purge the caches. Every message can potentially do this.
           // TODO: we may potentially want to add a config switch to disable this?
@@ -242,7 +242,8 @@ final class NioMicroserviceLive[Input, Output](
 
           new ProducerMsg(outputRecord, msg.committableOffset)
         }.toEither.left.map { e =>
-          logger.error(s"$name errored while processing message with id [{}]", v("requestId", msg.record.key()), e)
+
+          logger.error(s"$name errored while processing message with id [{}]", v("requestId", requestId), e)
           failureCounter.inc()
           val record = wrapThrowableInKafkaRecord(msg.record, e)
 
