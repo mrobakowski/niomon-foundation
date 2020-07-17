@@ -185,7 +185,7 @@ final class NioMicroserviceLive[Input, Output](
   lazy val logic: NioMicroserviceLogic[Input, Output] = logicFactory(this)
 
   /** @see [[NioMicroserviceLogic.processRecord]] */
-  def processRecord(input: ConsumerRecord[String, Input]): ProducerRecord[String, Output] = logic.processRecord(input)
+  def processRecord(record: ConsumerRecord[String, Input]): ProducerRecord[String, Output] = logic.processRecord(record)
 
   /** The akka-streaming graph for running the microservice. */
   def graph: RunnableGraph[DrainingControl[Done]] = {

@@ -16,7 +16,7 @@ class NioMicroserviceTest extends FlatSpec with Matchers with EmbeddedKafka with
     withRunningKafka {
       var n = 0
       val microservice = NioMicroserviceLive[String, String]("test", new NioMicroserviceLogic.Simple(_) {
-        override def process(input: String): (String, String) = {
+        override def process(record: String): (String, String) = {
           n += 1
           s"foobar$n" -> "default"
         }
@@ -46,7 +46,7 @@ class NioMicroserviceTest extends FlatSpec with Matchers with EmbeddedKafka with
       val microservice = NioMicroserviceLive[String, String]("test-with-error", new NioMicroserviceLogic.Simple(_) {
         var first = true
 
-        override def process(input: String): (String, String) = {
+        override def process(record: String): (String, String) = {
           if (first) {
             first = false
             throw new RuntimeException("foobar")
@@ -76,7 +76,7 @@ class NioMicroserviceTest extends FlatSpec with Matchers with EmbeddedKafka with
   it should "shutdown on error with no error topic configured" in {
     withRunningKafka {
       val microservice = NioMicroserviceLive[String, String]("test1", new NioMicroserviceLogic.Simple(_) {
-        override def process(input: String): (String, String) = {
+        override def process(record: String): (String, String) = {
           throw new RuntimeException("foobar")
         }
       })
@@ -94,7 +94,7 @@ class NioMicroserviceTest extends FlatSpec with Matchers with EmbeddedKafka with
   it should "continue processing after kafka goes down for a while" taggedAs(Slow) ignore {
     withRunningKafka {
       val microservice = NioMicroserviceLive[String, String]("faulty-kafka", new NioMicroserviceLogic.Simple(_) {
-        override def process(input: String): (String, String) = s"success-$input" -> "default"
+        override def process(record: String): (String, String) = s"success-$record" -> "default"
       })
       val control = microservice.run
 
@@ -129,9 +129,9 @@ class NioMicroserviceTest extends FlatSpec with Matchers with EmbeddedKafka with
 
   it should "handle long running NioMicroserviceLogics" taggedAs(Slow) ignore {
     val microservice = NioMicroserviceLive[String, String]("test-long", new NioMicroserviceLogic.Simple(_) {
-      override def process(input: String): (String, String) = {
+      override def process(record: String): (String, String) = {
         Thread.sleep(20000)
-        s"success-$input" -> "default"
+        s"success-$record" -> "default"
       }
     })
     val control = microservice.run
