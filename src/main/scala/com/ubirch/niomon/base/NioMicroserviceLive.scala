@@ -122,6 +122,7 @@ final class NioMicroserviceLive[Input, Output](
       .withBootstrapServers(kafkaUrl)
       .withGroupId(name)
       .withProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest")
+      .withProperty(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, "1000")
       // timeout for closing the producer stage - by default it'll wait for commits for 30 seconds
       .withStopTimeout(Try(config.getDuration("kafka.stopTimeout")).getOrElse(time.Duration.ofSeconds(30)))
 
