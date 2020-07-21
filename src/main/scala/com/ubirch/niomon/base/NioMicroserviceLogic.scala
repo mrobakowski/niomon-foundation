@@ -20,18 +20,18 @@ abstract class NioMicroserviceLogic[I, O](runtime: NioMicroservice[I, O]) extend
   final def stringifyException(e: Throwable, reqId: String): String = runtime.stringifyException(e, reqId)
 
   /** The business logic of the microservice */
-  def processRecord(input: ConsumerRecord[String, I]): ProducerRecord[String, O]
+  def processRecord(record: ConsumerRecord[String, I]): ProducerRecord[String, O]
 }
 
 object NioMicroserviceLogic {
   abstract class Simple[I, O](runtime: NioMicroservice[I, O]) extends NioMicroserviceLogic[I, O](runtime) {
-    final def processRecord(input: ConsumerRecord[String, I]): ProducerRecord[String, O] = {
-      val (output, topicKey) = process(input.value())
-      input.toProducerRecord(topic = outputTopics(topicKey), value = output)
+    final def processRecord(record: ConsumerRecord[String, I]): ProducerRecord[String, O] = {
+      val (output, topicKey) = process(record.value())
+      record.toProducerRecord(topic = outputTopics(topicKey), value = output)
     }
 
     /** Simpler version of [[NioMicroserviceLogic.processRecord]]. You only get the value of the input record and you
      * return a tuple (output value, destination topic alias (see [[NioMicroservice.outputTopics]])) */
-    def process(input: I): (O, String)
+    def process(record: I): (O, String)
   }
 }

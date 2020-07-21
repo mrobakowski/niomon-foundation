@@ -185,7 +185,7 @@ final class NioMicroserviceLive[Input, Output](
   lazy val logic: NioMicroserviceLogic[Input, Output] = logicFactory(this)
 
   /** @see [[NioMicroserviceLogic.processRecord]] */
-  def processRecord(input: ConsumerRecord[String, Input]): ProducerRecord[String, Output] = logic.processRecord(input)
+  def processRecord(record: ConsumerRecord[String, Input]): ProducerRecord[String, Output] = logic.processRecord(record)
 
   /** The akka-streaming graph for running the microservice. */
   def graph: RunnableGraph[DrainingControl[Done]] = {
@@ -211,11 +211,11 @@ final class NioMicroserviceLive[Input, Output](
 
     // the graph
     kafkaSource.map { msg =>
+      val requestId = msg.record.requestIdHeader().orNull
       processingSize.observe(1)
       processingLatency.time { () =>
         Try {
-          logger.info(s"$name is processing message with id [{}] and headers [{}]",
-            v("requestId", msg.record.key()), v("headers", msg.record.headersScala.asJava))
+          logger.info(s"$name is processing message with id [{}] and headers [{}]", v("requestId", requestId), v("headers", msg.record.headersScala.asJava))
 
           // An escape hatch to purge the caches. Every message can potentially do this.
           // TODO: we may potentially want to add a config switch to disable this?
@@ -242,7 +242,8 @@ final class NioMicroserviceLive[Input, Output](
 
           new ProducerMsg(outputRecord, msg.committableOffset)
         }.toEither.left.map { e =>
-          logger.error(s"$name errored while processing message with id [{}]", v("requestId", msg.record.key()), e)
+
+          logger.error(s"$name errored while processing message with id [{}]", v("requestId", requestId), e)
           failureCounter.inc()
           val record = wrapThrowableInKafkaRecord(msg.record, e)
 
