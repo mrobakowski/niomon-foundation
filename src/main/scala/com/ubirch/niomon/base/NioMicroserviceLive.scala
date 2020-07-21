@@ -129,7 +129,7 @@ final class NioMicroserviceLive[Input, Output](
   val producerSettingsForSuccess: ProducerSettings[String, Output] =
     ProducerSettings(producerConfig, new StringSerializer, outputPayload.serializer)
       .withBootstrapServers(kafkaUrl)
-      .withProperty(ProducerConfig.LINGER_MS_CONFIG, "100")
+      .withProperty(ProducerConfig.LINGER_MS_CONFIG, "10")
   // we create our own producer instead of letting akka-streams do it, because we need this instance to get the metrics
   val kafkaProducerForSuccess: KProducer[String, Output] = producerSettingsForSuccess.createKafkaProducer()
 
