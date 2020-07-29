@@ -181,7 +181,14 @@ final class NioMicroserviceLive[Input, Output](
       }
   }
 
+  /**
+   * The logic is by default lazy. This means that it is only materialized when the first message arrives in [[processRecord]].
+   * By using the config value "eagerStart" you can make the initialization eager.
+   * This is particularly useful for when there is code that needs to fail quickly.
+   */
   lazy val logic: NioMicroserviceLogic[Input, Output] = logicFactory(this)
+  val eagerLogicStart: Boolean = Try(config.getBoolean("eagerStart")).getOrElse(false)
+  if(eagerLogicStart) logic
 
   /** @see [[NioMicroserviceLogic.processRecord]] */
   def processRecord(input: ConsumerRecord[String, Input]): ProducerRecord[String, Output] = logic.processRecord(input)
