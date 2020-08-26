@@ -14,7 +14,6 @@ import com.typesafe.scalalogging.Logger
 import com.ubirch.kafka._
 import com.ubirch.niomon.cache.RedisCache
 import com.ubirch.niomon.healthcheck.{Checks, HealthCheckServer}
-import com.ubirch.niomon.util.EnrichedMap.toEnrichedMap
 import com.ubirch.niomon.util.{KafkaPayload, KafkaPayloadFactory, RetriableCommitter}
 import io.prometheus.client.exporter.HTTPServer
 import io.prometheus.client.hotspot.DefaultExports
@@ -225,36 +224,18 @@ final class NioMicroserviceLive[Input, Output](
         Try {
           logger.info(s"$name is processing message with id [{}] and headers [{}]", v("requestId", requestId), v("headers", msg.record.headersScala.asJava))
 
-          // An escape hatch to purge the caches. Every message can potentially do this.
-          // TODO: we may potentially want to add a config switch to disable this?
-          val msgHeaders = msg.record.headersScala
-          if (msgHeaders.CaseInsensitive.contains("x-niomon-purge-caches") &&
-            appConfig.hasPath("redisson")) {
-            redisCache.purgeCaches()
-          }
-
           val outputRecord: ProducerRecord[String, Output] = {
-            val deserializedMessage: ConsumerRecord[String, Input] =
             // by doing a get here, we effectively rethrow any deserialization errors
-              msg.record.copy(value = msg.record.value().get)
-
-            val res = processRecord(deserializedMessage)
-            // messages can be forced to follow a different path than normally. It was used by the event-log, but I
-            // don't think it's used anymore. TODO: investigate and maybe remove?
-            msgHeaders.CaseInsensitive.get("x-niomon-force-reply-to") match {
-              case Some(destination) => res.copy(topic = destination)
-              case None => res
-            }
+            val deserializedMessage: ConsumerRecord[String, Input] = msg.record.copy(value = msg.record.value().get)
+            processRecord(deserializedMessage)
           }
           successCounter.inc()
 
           new ProducerMsg(outputRecord, msg.committableOffset)
         }.toEither.left.map { e =>
-
           logger.error(s"$name errored while processing message with id [{}]", v("requestId", requestId), e)
           failureCounter.inc()
           val record = wrapThrowableInKafkaRecord(msg.record, e)
-
           new ProducerErr(record, msg.committableOffset)
         }
       }
