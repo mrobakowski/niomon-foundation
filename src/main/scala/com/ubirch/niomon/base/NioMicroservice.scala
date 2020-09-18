@@ -93,7 +93,8 @@ trait NioMicroservice[I, O] {
    * to 500.
    */
   def wrapThrowableInKafkaRecord(record: ConsumerRecord[String, Try[I]], e: Throwable): ProducerRecord[String, Throwable] = {
-    var prodRecord = record.toProducerRecord(topic = errorTopic.getOrElse("unused-topic"), value = e)
+    var prodRecord = record
+      .toProducerRecord(topic = errorTopic.getOrElse("unused-topic"), value = e)
       .withExtraHeaders("previous-microservice" -> name)
 
     val headers = prodRecord.headersScala
