@@ -112,9 +112,9 @@ trait NioMicroservice[I, O] {
    * If the inner exception is a [[WithHttpStatus]], it is unwrapped and the appropriate http status header is set.
    */
   def producerErrorRecordToStringRecord(record: ProducerRecord[String, Throwable], errorTopic: String): ProducerRecord[String, String] = {
-    val (exception, status) = record.value() match {
-      case WithHttpStatus(s, cause) => (cause, Some(s))
-      case e => (e, None)
+    val (exception, status, code) = record.value() match {
+      case WithHttpStatus(s, cause, code) => (cause, Some(s), code)
+      case e => (e, None, None)
     }
 
     logger.error(s"error sink has received an exception, sending on [$errorTopic]", exception)
@@ -125,7 +125,9 @@ trait NioMicroservice[I, O] {
 
     val errRecord: ProducerRecord[String, String] = record.copy(topic = errorTopic, value = stringifiedException)
     val errRecordWithStatus = status match {
-      case Some(s) => errRecord.withExtraHeaders("http-status-code" -> s.toString)
+      case Some(s) =>
+        val headers = ("http-status-code" -> s.toString) +: code.toList.map(c => "x-code" -> c.toString)
+        errRecord.withExtraHeaders(headers : _ *)
       case None => errRecord
     }
 
@@ -161,7 +163,7 @@ object NioMicroservice {
       redisCache.cachedF(f)
   }
 
-  case class WithHttpStatus(status: Int, cause: Throwable) extends Exception(cause)
+  case class WithHttpStatus(status: Int, cause: Throwable, code: Option[Int] =  None) extends Exception(cause)
 
   // used only for stringifying the exceptions
   private val OM = new ObjectMapper()
